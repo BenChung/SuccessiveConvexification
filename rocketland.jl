@@ -49,7 +49,7 @@ type DescentProblem
     DescentProblem(;g=1.0,mdry=1.0,mwet=2.0,Tmin=2.0,Tmax=5.0,deltaMax=20.0,thetaMax=90.0,gammaGs=30.0,omMax=60.0,
                     jB=diagm([1e-2,1e-2,1e-2])/5, alpha=0.01,rTB=[-1e-2,0,0],rIi=[2.0,2.0,0.0],rIf=[0.0,0.0,0.0],
                     vIi=[-2,-2,0],vIf=[-0.1,0.0,0.0],qBIi=[1.0,0,0,0],qBIf=[1.0,0,0,0],wBi=[0.0,0.0,0.0],
-                    wBf=[0.0,0,0],K=50,imax=15,wNu=1e5,wID=1e2, wDS=1e-3, nuTol=1e-10, delTol = 1e-3, tf_guess=5.0) =
+                    wBf=[0.0,0,0],K=50,imax=15,wNu=1e5,wID=1e-1, wDS=1e-3, nuTol=1e-10, delTol = 1e-3, tf_guess=5.0) =
         new(g,mdry,mwet,Tmin,Tmax,deltaMax,thetaMax,gammaGs,omMax,jB,alpha,rTB,rIi,rIf,vIi,vIf,
             qBIi,qBIf,wBi,wBf,K,imax,wNu,wID,wDS,nuTol,delTol,tf_guess)
 end
@@ -68,22 +68,17 @@ struct LinPoint
     control::SArray{Tuple{3}, Float64, 1, 3}
 end
 
-struct LinRes
-    endpoint::SArray{Tuple{14},Float64,1,14}
-    derivative::SArray{Tuple{21,14},Float64,2,294}
+if !isdefined(:Dynamics)
+	include("dynamics.jl")	
 end
 
 type ProblemIteration
     problem::DescentProblem
     sigma::Float64
-    about::Array{LinPoint,1}
-    dynam::Array{LinRes,  1}
+    about::Array{Dynamics.LinPoint,1}
+    dynam::Array{Dynamics.LinRes,  1}
 end
-
-if !isdefined(:Dynamics)
-    include("dynamics.jl")
-end
-using Dynamics
+	
 
 function create_initial(problem::DescentProblem)
     K = problem.K
@@ -100,7 +95,7 @@ function create_initial(problem::DescentProblem)
         control_init = @SVector [mk*problem.g,0,0]
         initial_points[k] = LinPoint(state_init, control_init)
     end
-    linpoints = linearize_dynamics(initial_points, problem.tf_guess, 1.0/(K+1), ProbInfo(problem))
+    linpoints = Dynamics.linearize_dynamics(initial_points, problem.tf_guess, 1.0/(K+1), ProbInfo(problem))
     return ProblemIteration(problem, problem.tf_guess, initial_points, linpoints)
 end
 
@@ -151,9 +146,7 @@ function solve_step(iteration::ProblemIteration)
         dk = iterDynam[i]
         ab = iterAbout[i]
         abn = iterAbout[i+1]
-        ctrl = hcat(vcat(x[:,i]-ab.state, u[:,i]-ab.control, u[:,i+1]-abn.control,sigma-sigHat))'
-        println(dk.derivative)
-        @constraint(m, x[:,i+1] .== Array{Float64,2}(dk.derivative) *ctrl + dk.endpoint)
+        @constraint(m, x[:,i+1] .== Dynamics.next_step(dk, iterAbout[i], iterAbout[i+1], x[:,i], u[:,i], u[:,i+1], sigma, sigHat, nu[:,i]))
     end
     for i=1:K+1
         #state constraints
@@ -208,7 +201,7 @@ function solve_step(iteration::ProblemIteration)
     end
 
     #linearize dynamics and return
-    linpoints = linearize_dynamics(traj_points, sigmaSol, 1.0/(K+1), ProbInfo(prob))
+    linpoints = Dynamics.linearize_dynamics(traj_points, sigmaSol, 1.0/(K+1), ProbInfo(prob))
     return ProblemIteration(prob, sigmaSol, traj_points, linpoints), norm(getvalue(nu)[:,:]), norm(getvalue(optDelta))
 end
 

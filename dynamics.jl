@@ -3,7 +3,11 @@ module Dynamics
     using ForwardDiff 
     using DiffResults
     using StaticArrays
-    using ..ProbInfo, ..LinPoint, ..LinRes
+    using ..ProbInfo, ..LinPoint
+    struct LinRes
+        endpoint::SArray{Tuple{14},Float64,1,14}
+        derivative::SArray{Tuple{14,21},Float64,2,294}
+    end
     
     const mass_idx = 1
     const r_idx = SVector(2,3,4)
@@ -74,7 +78,7 @@ module Dynamics
             up = p[upC]
             sigma = p[sigmaC]
             prob = ODEProblem(dynamics_sim, state, eltype(p).((0.0,dt)), IntegratorParameters(dt,uk,up,sigma,pinfo))
-            DifferentialEquations.solve(prob, Tsit5(),save_everystep=false,saveat=[dt])[end]
+            DifferentialEquations.solve(prob, Tsit5(),reltol=1e-8,abstol=1e-8,force_dtmin=true,dtmin=0.0001,save_everystep=false,saveat=[dt])[end]
         end
         return f
     end
@@ -83,7 +87,8 @@ module Dynamics
         ip = SVector{21}(vcat(istate, c1, c2, sigma_lin))
         res = DiffResults.JacobianResult((@MVector zeros(14)),MVector(ip))
         ForwardDiff.jacobian!(res, fun, ip)
-        return LinRes(DiffResults.value(res),DiffResults.jacobian(res))
+        jcb = DiffResults.jacobian(res)
+        return LinRes(DiffResults.value(res),SMatrix{14,21}(jcb))
     end
 
     function linearize_dynamics(states::Array{LinPoint,1}, sigma_lin::Float64, dt::Float64, info::ProbInfo)
@@ -96,5 +101,9 @@ module Dynamics
         end
         return results
     end
-    export linearize_dynamics
+    function next_step(dynam, ab, abn, state, control_k, control_kp, sigma, sigHat, relax)
+        ctrl = vcat(state-ab.state, control_k-ab.control, control_kp-abn.control,sigma-sigHat)
+        return dynam.derivative *ctrl + dynam.endpoint + relax
+    end
+    export linearize_dynamics, next_step, LinRes
 end
