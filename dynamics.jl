@@ -42,7 +42,7 @@ module Dynamics
                         omegab[3]  omegab[2] -omegab[1]  z         ]
     end
 
-    function dx(state::SArray{Tuple{14}, T, 1, 14} where T, u::SArray{Tuple{3}, T, 1, 3} where T, info::ProbInfo)
+    function dx(state::StaticArrays.SArray{Tuple{14},T,1,14} where T, u::SArray{Tuple{3}, T, 1, 3} where T, info::ProbInfo)
         qbi = state[qbi_idx]
         omb = state[omb_idx]
         thr_acc = DCM(qbi) * u/state[mass_idx]
@@ -57,13 +57,6 @@ module Dynamics
                 rot_acc[1], rot_acc[2], rot_acc[3]]
     end
 
-    function dynamics_sim(state::SArray{Tuple{14}, T, 1, 14} where T, p::IntegratorParameters, t)
-        lkm = (p.dt-t)/p.dt
-        lkp = t/p.dt
-        u = p.uk*lkm + p.up*lkp
-        p.sigma*dx(state,u,p.pinfo)
-    end
-
     macro genIdx(start,last)
         return :(@SVector [i for i=$start:$last])
     end
@@ -71,33 +64,35 @@ module Dynamics
     const ukC = @genIdx(15,17)
     const upC = @genIdx(18,20)
     const sigmaC = 21
-    function fdiff(pinfo,dt)
-        function f(p)
-            state = p[stateC]
-            uk = p[ukC]
-            up = p[upC]
-            sigma = p[sigmaC]
-            prob = ODEProblem(dynamics_sim, state, eltype(p).((0.0,dt)), IntegratorParameters(dt,uk,up,sigma,pinfo))
-            DifferentialEquations.solve(prob, Tsit5(),reltol=1e-8,abstol=1e-8,force_dtmin=true,dtmin=0.0001,save_everystep=false,saveat=[dt])[end]
+
+    function make_dyn(dt,pinfo)
+        function dynamics_sim(ipm, state, p, t)
+            lkm = (dt-t)/dt
+            lkp = t/dt
+            u = p[ukC]*lkm + p[upC]*lkp
+            ipm[:] = p[sigmaC]*dx(state + p[stateC],u,pinfo)
         end
-        return f
+        return dynamics_sim
     end
 
-    function linearize_segment(fun, sigma_lin::Float64, istate::SVector{14}, c1::SVector{3}, c2::SVector{3})
+    function linearize_segment(fun, sigma_lin::Float64, istate::SVector{14}, c1::SVector{3}, c2::SVector{3}, dt)
         ip = SVector{21}(vcat(istate, c1, c2, sigma_lin))
-        res = DiffResults.JacobianResult((@MVector zeros(14)),MVector(ip))
-        ForwardDiff.jacobian!(res, fun, ip)
-        jcb = DiffResults.jacobian(res)
-        return LinRes(DiffResults.value(res),SMatrix{14,21}(jcb))
+        prob = ODELocalSensitivityProblem(fun, zeros(14), (0.0,dt), ip)
+        sol = DifferentialEquations.solve(prob, Tsit5(),save_everystep=false)
+        res = sol[end]
+        endp = res[stateC]
+
+        x,dp = extract_local_sensitivities(sol,dt)
+        return LinRes(SVector{14}(x),SMatrix{14,21}(hcat(dp...)))
     end
 
     function linearize_dynamics(states::Array{LinPoint,1}, sigma_lin::Float64, dt::Float64, info::ProbInfo)
         results = Array{LinRes,1}(length(states)-1)
-        fun = fdiff(info,dt)
+        fun = make_dyn(dt,info)
         for i=1:length(states)-1
             cstate = states[i]
             nstate = states[i+1]
-            results[i] = linearize_segment(fun, sigma_lin, cstate.state, cstate.control, nstate.control)
+            results[i] = linearize_segment(fun, sigma_lin, cstate.state, cstate.control, nstate.control, dt)
         end
         return results
     end

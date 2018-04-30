@@ -1,3 +1,4 @@
+module Rocketland
 using JuMP
 using Mosek
 using Rotations
@@ -68,9 +69,7 @@ struct LinPoint
     control::SArray{Tuple{3}, Float64, 1, 3}
 end
 
-if !isdefined(:Dynamics)
-	include("dynamics.jl")	
-end
+include("dynamics.jl")	
 
 type ProblemIteration
     problem::DescentProblem
@@ -216,4 +215,6 @@ function solve_problem(iprob::DescentProblem)
         iter = iter+1
     end
     return prob,cnu,cdel
+end
+export solve_problem, DescentProblem
 end
