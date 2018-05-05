@@ -50,7 +50,7 @@ type DescentProblem
     DescentProblem(;g=1.0,mdry=1.0,mwet=2.0,Tmin=2.0,Tmax=5.0,deltaMax=20.0,thetaMax=90.0,gammaGs=30.0,omMax=60.0,
                     jB=diagm([1e-2,1e-2,1e-2])/5, alpha=0.01,rTB=[-1e-2,0,0],rIi=[2.0,2.0,0.0],rIf=[0.0,0.0,0.0],
                     vIi=[-2,-2,0],vIf=[-0.1,0.0,0.0],qBIi=[1.0,0,0,0],qBIf=[1.0,0,0,0],wBi=[0.0,0.0,0.0],
-                    wBf=[0.0,0,0],K=50,imax=15,wNu=1e5,wID=1e-1, wDS=1e-3, nuTol=1e-10, delTol = 1e-3, tf_guess=5.0) =
+                    wBf=[0.0,0,0],K=50,imax=15,wNu=1e5,wID=1e-3, wDS=1e-1, nuTol=1e-10, delTol = 1e-3, tf_guess=5.0) =
         new(g,mdry,mwet,Tmin,Tmax,deltaMax,thetaMax,gammaGs,omMax,jB,alpha,rTB,rIi,rIf,vIi,vIf,
             qBIi,qBIf,wBi,wBf,K,imax,wNu,wID,wDS,nuTol,delTol,tf_guess)
 end
@@ -69,13 +69,13 @@ struct LinPoint
     control::SArray{Tuple{3}, Float64, 1, 3}
 end
 
-include("dynamics.jl")	
+include("dynamics.jl")
 
 type ProblemIteration
     problem::DescentProblem
     sigma::Float64
-    about::Array{Dynamics.LinPoint,1}
-    dynam::Array{Dynamics.LinRes,  1}
+    about::Array{LinPoint,1}
+    dynam::Array{Dynamics.LinRes,1}
 end
 	
 
