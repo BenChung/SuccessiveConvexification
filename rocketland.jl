@@ -3,6 +3,8 @@ using JuMP
 using Mosek
 using Rotations
 using StaticArrays
+using RocketlandDefns
+import Dynamics
 
 #state indexing
 const state_dim = 14
@@ -14,88 +16,25 @@ const omb_idx_it = 12:14
 const acc_width = state_dim+control_dim*2+3
 const acc_height = state_dim
 const mass_idx = 1
-
-type DescentProblem
-    g::Float64
-    mdry::Float64
-    mwet::Float64
-    Tmin::Float64
-    Tmax::Float64
-    deltaMax::Float64
-    thetaMax::Float64
-    gammaGs::Float64
-    omMax::Float64
-    jB::Array{Float64,2}
-    alpha::Float64
-    rTB::Array{Float64,1}
-
-    rIi::Array{Float64,1}
-    rIf::Array{Float64,1}
-    vIi::Array{Float64,1}
-    vIf::Array{Float64,1}
-    qBIi::Array{Float64,1}
-    qBIf::Array{Float64,1}
-    wBi::Array{Float64,1}
-    wBf::Array{Float64,1}
-
-    K::Int64
-    imax::Int64
-    wNu::Float64
-    wID::Float64
-    wDS::Float64
-    nuTol::Float64
-    delTol::Float64
-    tf_guess::Float64
-
-    DescentProblem(;g=1.0,mdry=1.0,mwet=2.0,Tmin=2.0,Tmax=5.0,deltaMax=20.0,thetaMax=90.0,gammaGs=30.0,omMax=60.0,
-                    jB=diagm([1e-2,1e-2,1e-2])/5, alpha=0.01,rTB=[-1e-2,0,0],rIi=[2.0,2.0,0.0],rIf=[0.0,0.0,0.0],
-                    vIi=[-2,-2,0],vIf=[-0.1,0.0,0.0],qBIi=[1.0,0,0,0],qBIf=[1.0,0,0,0],wBi=[0.0,0.0,0.0],
-                    wBf=[0.0,0,0],K=50,imax=15,wNu=1e5,wID=1e-3, wDS=1e-1, nuTol=1e-10, delTol = 1e-3, tf_guess=5.0) =
-        new(g,mdry,mwet,Tmin,Tmax,deltaMax,thetaMax,gammaGs,omMax,jB,alpha,rTB,rIi,rIf,vIi,vIf,
-            qBIi,qBIf,wBi,wBf,K,imax,wNu,wID,wDS,nuTol,delTol,tf_guess)
-end
-
-struct ProbInfo
-    a::Float64
-    g0::Float64
-    jB::SArray{Tuple{3,3},Float64,2,9}
-    jBi::SArray{Tuple{3,3},Float64,2,9}
-    rTB::SArray{Tuple{3}, Float64, 1, 3}
-    ProbInfo(from::DescentProblem) = new(from.alpha, from.g, SMatrix{3,3}(from.jB), SMatrix{3,3}(inv(from.jB)), SVector{3}(from.rTB))
-end
-
-struct LinPoint
-    state::SArray{Tuple{14}, Float64, 1, 14}
-    control::SArray{Tuple{3}, Float64, 1, 3}
-end
-
-include("dynamics.jl")
-
-type ProblemIteration
-    problem::DescentProblem
-    sigma::Float64
-    about::Array{LinPoint,1}
-    dynam::Array{Dynamics.LinRes,1}
-end
 	
 
 function create_initial(problem::DescentProblem)
-    K = problem.K
-    initial_points = Array{LinPoint,1}(K+1)
-    for k=1:K+1
-        mk = (K+1-k)/(K+1) * problem.mwet + (k/(K+1))*problem.mdry
-        rIk = (K+1-k)/(K+1) * problem.rIi + (k/(K+1))*problem.rIf
-        vIk = (K+1-k)/(K+1) * problem.vIi + (k/(K+1))*problem.vIf
+	K = problem.K
+	initial_points = Array{LinPoint,1}(K+1)
+	for k=0:K
+		mk = (K-k)/(K) * problem.mwet + (k/(K))*problem.mdry
+		rIk = (K-k)/(K) * problem.rIi + (k/(K))*problem.rIf
+		vIk = (K-k)/(K) * problem.vIi + (k/(K))*problem.vIf
 
-        rot = rotation_between([1,0,0], -vIk)
-        qBIk = @SVector [rot.w, rot.x, rot.y, rot.z]
-        TBk = @SVector [mk*problem.g,0,0]
-        state_init = vcat(mk,rIk,vIk,qBIk,(@SVector [0.0,0,0]))
-        control_init = @SVector [mk*problem.g,0,0]
-        initial_points[k] = LinPoint(state_init, control_init)
-    end
-    linpoints = Dynamics.linearize_dynamics(initial_points, problem.tf_guess, 1.0/(K+1), ProbInfo(problem))
-    return ProblemIteration(problem, problem.tf_guess, initial_points, linpoints)
+		rot = rotation_between([1,0,0], -vIk)
+		qBIk = @SVector [rot.w, rot.x, rot.y, rot.z]
+		TBk = @SVector [mk*problem.g,0,0]
+		state_init = vcat(mk,rIk,vIk,qBIk,(@SVector [0.0,0,0]))
+		control_init = @SVector [mk*problem.g,0,0]
+		initial_points[k+1] = LinPoint(state_init, control_init)
+	end
+	linpoints = Dynamics.linearize_dynamics(initial_points, problem.tf_guess, 1.0/(K+1), ProbInfo(problem))
+	return ProblemIteration(problem, problem.tf_guess, initial_points, linpoints)
 end
 
 function solve_step(iteration::ProblemIteration)
@@ -205,16 +144,16 @@ function solve_step(iteration::ProblemIteration)
 end
 
 function solve_problem(iprob::DescentProblem)
-    prob = create_initial(iprob)
-    cnu = Inf
-    cdel = Inf
-    iter = 1
-    while (iprob.nuTol < cnu || iprob.delTol < cdel) && iter < iprob.imax
-        println(cnu, "|", cdel, "|", iprob.nuTol < cnu, "|", iprob.delTol < cdel)
-        prob,cnu,cdel = solve_step(prob)
-        iter = iter+1
-    end
-    return prob,cnu,cdel
+	prob = create_initial(iprob)
+	cnu = Inf
+	cdel = Inf
+	iter = 1
+	while (iprob.nuTol < cnu || iprob.delTol < cdel) && iter < iprob.imax
+		println(cnu, "|", cdel, "|", iprob.nuTol < cnu, "|", iprob.delTol < cdel)
+		prob,cnu,cdel = solve_step(prob)
+		iter = iter+1
+	end
+	return prob,cnu,cdel
 end
 export solve_problem, DescentProblem
 end
