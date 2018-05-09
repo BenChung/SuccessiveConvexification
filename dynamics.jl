@@ -3,7 +3,11 @@ module Dynamics
     using ForwardDiff 
     using DiffResults
     using StaticArrays
-    using RocketlandDefns
+    using ..ProbInfo, ..LinPoint
+    struct LinRes
+        endpoint::SArray{Tuple{14},Float64,1,14}
+        derivative::SArray{Tuple{14,21},Float64,2,294}
+    end
     
     const mass_idx = 1
     const r_idx = SVector(2,3,4)
@@ -19,7 +23,7 @@ module Dynamics
         pinfo :: ProbInfo
     end
 
-    function DCM(quat::SArray{Tuple{4}, T, 1, 4} where T)
+    @inline function DCM(quat::SArray{Tuple{4}, T, 1, 4} where T)
         q0 = quat[1]
         q1 = quat[2]
         q2 = quat[3]
@@ -36,7 +40,7 @@ module Dynamics
                         (2*(p3 - p4))        (2*(p5 + p6))       (1-2*(q1^2 + q2^2)) ]
     end
 
-    function Omega{T}(omegab::SArray{Tuple{3}, T, 1, 3})
+    @inline function Omega{T}(omegab::SArray{Tuple{3}, T, 1, 3})
         z = zero(T)
         return @SMatrix [z        -omegab[1] -omegab[2] -omegab[3];
                         omegab[1] z           omegab[3] -omegab[2];
@@ -44,7 +48,7 @@ module Dynamics
                         omegab[3]  omegab[2] -omegab[1]  z         ]
     end
 
-    function dx(output, state::StaticArrays.SArray{Tuple{14},T,1,14} where T, u::SArray{Tuple{3}, T, 1, 3} where T, mult, info::ProbInfo)
+    @inline function dx(output, state::StaticArrays.SArray{Tuple{14},T,1,14} where T, u::SArray{Tuple{3}, T, 1, 3} where T, mult, info::ProbInfo)
         qbi = state[qbi_idx]
         omb = state[omb_idx]
         thr_acc = DCM(qbi) * u/state[mass_idx]
@@ -68,7 +72,7 @@ module Dynamics
     const sigmaC = 21
 
     function make_dyn(dt,pinfo)
-        function dynamics_sim(ipm, state, p, t)
+        @inline function dynamics_sim(ipm, state, p, t)
             lkm = (dt-t)/dt
             lkp = t/dt
             dx(ipm, state + p[stateC], p[ukC]*lkm + p[upC]*lkp, p[sigmaC], pinfo)
@@ -105,5 +109,4 @@ module Dynamics
         return dynam.derivative *ctrl + dynam.endpoint + relax
     end
     export linearize_dynamics, next_step, LinRes
-    export linearize_dynamics, next_step
 end
