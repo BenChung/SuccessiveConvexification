@@ -3,11 +3,7 @@ module Dynamics
     using ForwardDiff 
     using DiffResults
     using StaticArrays
-    using ..ProbInfo, ..LinPoint
-    struct LinRes
-        endpoint::SArray{Tuple{14},Float64,1,14}
-        derivative::SArray{Tuple{14,21},Float64,2,294}
-    end
+    using RocketlandDefns
     
     const mass_idx = 1
     const r_idx = SVector(2,3,4)
