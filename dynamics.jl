@@ -144,5 +144,31 @@ module Dynamics
 
         MOI.addconstraint!(model, MOI.VectorAffineFunction(outp, vars, coeffs, consts), MOI.Zeros(14))
     end
+    function update_dyn!(model::MOI.ModelLike, constraint::MOI.ConstraintIndex, 
+        dynam::Array{LinRes,1}, ab::Array{LinPoint,1}, abn::Array{LinPoint,1}, sigHat::Float64) 
+        # for row [derivative[row] 1 -1].[opt..., relax[row], nst[row]] = endpoint[row]
+        # or
+        # [derivative eye(14) -eye(14)]*[opt relax nst] + endpoint = 0 <- this one
+
+        #=  dynam.derivative*vcat(state, control_k, control_kp, sigma)
+                - dynam.derivative*vcat(ab.state, ab.control, abn.control,sigHat)
+                + dynam.endpoint + relax - nst = 0 =#
+
+        coeffs = Float64[]
+        consts = Float64[]
+        xvs = model.state_vars
+        for row in 1:14
+            rsvs = xvs[row,:]
+            rrow = dynam.derivative[row,:]
+            rconst = dynam.endpoint[row]-dot(rrow, vcat(ab.state, ab.control, abn.control,sigHat))
+            MOI.modifyconstraint!(model, constraint, MOI.MultirowChange())
+            append!(coeffs, rrow)
+            push!(coeffs, 1)
+            push!(coeffs, -1)
+            push!(consts, rconst)
+        end
+        MOI.modifyconstraint!(model, constraint, MOI.MultirowChange())
+        MOI.addconstraint!(model, MOI.VectorAffineFunction(outp, vars, coeffs, consts), MOI.Zeros(14))
+    end
     export linearize_dynamics, next_step
 end

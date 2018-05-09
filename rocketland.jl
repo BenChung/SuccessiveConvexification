@@ -18,7 +18,39 @@ const omb_idx_it = 12:14
 const acc_width = state_dim+control_dim*2+3
 const acc_height = state_dim
 const mass_idx = 1
-	
+
+
+const MOI=MathOptInterface
+
+struct ModelData
+	model::MOI.ModelLike
+
+	# variable indices for solutions
+	state_vars::Array{MOI.VariableIndex, 2}
+	control_vars::Array{MOI.VariableIndex, 2}
+	sigmav::MOI.VariableIndex
+	nusv::MOI.VariableIndex
+	deltasv::MOI.VariableIndex
+
+	#constraint indices for resolve
+	dyn_constraints::Array{MOI.ConstraintIndex, 1}
+	nu_constraints::Array{MOI.ConstraintIndex, 1}
+	sigma_constraint::MOI.ConstraintIndex
+end
+
+struct ProblemIteration
+	problem::DescentProblem
+	sigma::Float64
+	about::Array{LinPoint,1}
+	dynam::Array{LinRes,1}
+	iter::Int
+
+	model::ModelData
+end
+
+function Base.show(io::IO, pi::ProblemIteration)
+	print(io, "Rocketland Problem: iteration $(pi.iter)")
+end
 
 function create_initial(problem::DescentProblem)
 	K = problem.K
@@ -36,21 +68,19 @@ function create_initial(problem::DescentProblem)
 		initial_points[k+1] = LinPoint(state_init, control_init)
 	end
 	linpoints = Dynamics.linearize_dynamics(initial_points, problem.tf_guess, 1.0/(K+1), ProbInfo(problem))
-	return ProblemIteration(problem, problem.tf_guess, initial_points, linpoints)
+	model = build_model(problem, K, linpoints, initial_points, problem.tf_guess)
+	return ProblemIteration(problem, problem.tf_guess, initial_points, linpoints, 0, model)
 end
 
-const MOI=MathOptInterface
-function solve_step(iteration::ProblemIteration)
-	model = MosekOptimizer(MSK_IPAR_INFEAS_REPORT_AUTO=1)
-	prob = iteration.problem
-	K = iteration.problem.K
-	iterDynam = iteration.dynam
-	iterAbout = iteration.about
-	sigHat = iteration.sigma
+function build_model(prob::DescentProblem, K::Int, iterDynam::Array{LinRes,1}, iterAbout::Array{LinPoint,1}, sigHat::Float64)::ModelData
 
+	model = MosekOptimizer(MSK_IPAR_INFEAS_REPORT_AUTO=1)
 	tggs = tand(prob.gammaGs)
 	sqcm = sqrt((1-cosd(prob.thetaMax))/2)
 	delMax = cosd(prob.deltaMax)
+
+	dynamic_constraints = MOI.ConstraintIndex[]
+	trust_region_constraints = MOI.ConstraintIndex[]
 
 	#main state variables
 	xv = reshape(MOI.addvariables!(model, state_dim*(K+1)), state_dim, K+1)
@@ -95,7 +125,7 @@ function solve_step(iteration::ProblemIteration)
 	MOI.addconstraint!(model, MOI.SingleVariable(xv[mass_idx,1]), MOI.EqualTo(prob.mwet))
 	eq_veccons(xv[r_idx_it,1], prob.rIi)
 	eq_veccons(xv[v_idx_it,1],prob.vIi)
-	eq_veccons(xv[qbi_idx_it,1],prob.qBIi)
+	#eq_veccons(xv[qbi_idx_it,1],prob.qBIi)
 	eq_veccons(xv[omb_idx_it,1],prob.wBi)
 
 	#final state constraints
@@ -110,8 +140,8 @@ function solve_step(iteration::ProblemIteration)
 		dk = iterDynam[i]
 		ab = iterAbout[i]
 		abn = iterAbout[i+1]
-		Dynamics.next_step(model, xv[:,i+1], dk, iterAbout[i], iterAbout[i+1], 
-								  xv[:,i], uv[:,i], uv[:,i+1], sigmav, sigHat, nuv[:,i])
+		push!(dynamic_constraints, Dynamics.next_step(model, xv[:,i+1], dk, iterAbout[i], iterAbout[i+1], 
+								  xv[:,i], uv[:,i], uv[:,i+1], sigmav, sigHat, nuv[:,i]))
 	end
 
 	MOI.addconstraint!(model, MOI.VectorAffineFunction([collect(1:K+1);collect(1:K+1)], [xv[mass_idx,:]; gs_h], [fill(1/tggs, K+1); fill(-1.0, K+1)], zeros(K+1)), MOI.Zeros(K+1))
@@ -151,10 +181,10 @@ function solve_step(iteration::ProblemIteration)
 	# 2*s*t >= ||x||^2 where s is a variable constrained to 1 (2)
 	for i=1:K+1
 		b = (sum(iterAbout[i].state .^ 2) + sum(iterAbout[i].control .^ 2))/2
-		MOI.addconstraint!(model, MOI.ScalarAffineFunction(
+		push!(trust_region_constraints, MOI.addconstraint!(model, MOI.ScalarAffineFunction(
 			[xv[:,i]; uv[:,i]; txv[i]; deltaIs[i]], 
 			[-iterAbout[i].state; -iterAbout[i].control; 1.0; -1/2], 0.0), 
-			MOI.EqualTo(-b)) # eqn (1)
+			MOI.EqualTo(-b))) # eqn (1)
 		MOI.addconstraint!(model, MOI.SingleVariable(sxv[i]), MOI.EqualTo(1.0))
 		MOI.addconstraint!(model, MOI.VectorOfVariables([sxv[i]; txv[i]; xv[:,i]; uv[:,i]]), MOI.RotatedSecondOrderCone(2+state_dim+control_dim))
 	end
@@ -163,11 +193,26 @@ function solve_step(iteration::ProblemIteration)
 	# Q = id, a = -2 sigHat, b=-deltasv + sigHat^2 (look ma no vectors) <=>
 	# t + -2 sigHat sigma - deltasv = -b_c (3)
 	# 2*s*t >= ||sigma||^2 where s = 1 (4)
-	MOI.addconstraint!(model, MOI.ScalarAffineFunction(MOI.VariableIndex[sigmav, tsv, deltasv], [-sigHat, 1.0, -0.5], 0.0), MOI.EqualTo(-sigHat^2/2))
+	sigma_constraint = MOI.addconstraint!(model, MOI.ScalarAffineFunction(MOI.VariableIndex[sigmav, tsv, deltasv], [-sigHat, 1.0, -0.5], 0.0), MOI.EqualTo(-sigHat^2/2))
 	MOI.addconstraint!(model, MOI.VectorOfVariables([ssv, tsv, sigmav]), MOI.RotatedSecondOrderCone(3))
 	MOI.addconstraint!(model, MOI.SingleVariable(ssv), MOI.EqualTo(1.0))
-	
 
+	return ModelData(model, xv, uv, sigmav, nuSum, deltaI, dynamic_constraints, trust_region_constraints, sigma_constraint)
+end
+
+function update_model(K::Int, md::ModelData, about::Array{LinPoint,1}, dynam::Array{LinRes,1}, sigma::Float64)
+	model = md.model
+	#update dynamics
+	for i=1:K
+		Dynamics.update_dyn!(model, md.dyn_constraints[i], dynam[i], about[i], about[i+1], sigma)
+	end
+end
+
+function solve_step(iteration::ProblemIteration)
+	model = MosekOptimizer(MSK_IPAR_INFEAS_REPORT_AUTO=1)
+	K = iteration.problem.K
+	modeldata = iteration.model
+	model = modeldata.model
 	MOI.optimize!(model)
 	status = MOI.get(model, MOI.TerminationStatus())
 	if status != MOI.Success
@@ -178,24 +223,25 @@ function solve_step(iteration::ProblemIteration)
 	if result_status != MOI.FeasiblePoint
 	    error("Solver ran successfully did not return a feasible point. The problem may be infeasible.")
 	end
-	xsol1 = reshape(MOI.get(model, MOI.VariablePrimal(), reshape(xv, length(xv))), state_dim, K+1)
-	nusol1 = reshape(MOI.get(model, MOI.VariablePrimal(), reshape(nuv, length(nuv))), state_dim, K+1)
-	usol1 = reshape(MOI.get(model, MOI.VariablePrimal(), reshape(uv, length(uv))), control_dim, K+1)
-	sigmasol1 = MOI.get(model, MOI.VariablePrimal(), sigmav)
-	deltasol1 = MOI.get(model, MOI.VariablePrimal(), nuSum)
-	deltaIsol = MOI.get(model, MOI.VariablePrimal(), deltaI)
-	txvsol1 = MOI.get(model, MOI.VariablePrimal(), txv)
+	state_vars = modeldata.state_vars
+	control_vars = modeldata.control_vars
+	xsol1 = reshape(MOI.get(model, MOI.VariablePrimal(), reshape(state_vars, length(state_vars))), state_dim, K+1)
+	usol1 = reshape(MOI.get(model, MOI.VariablePrimal(), reshape(control_vars, length(control_vars))), control_dim, K+1)
+	sigmasol1 = MOI.get(model, MOI.VariablePrimal(), modeldata.sigmav)
+	deltasol1 = MOI.get(model, MOI.VariablePrimal(), modeldata.nusv)
+	deltaIsol = MOI.get(model, MOI.VariablePrimal(), modeldata.deltasv)
 
 	#make linear points
 	traj_points = Array{LinPoint,1}(K+1)
 	for k=1:K+1
 		traj_points[k] = LinPoint(xsol1[:,k], usol1[:,k])
 	end
-	MOI.free!(model)
 
-	#linearize dynamics and return
-	linpoints = Dynamics.linearize_dynamics(traj_points, sigmasol1, 1.0/(K+1), ProbInfo(prob))
-	return ProblemIteration(prob, sigmasol1, traj_points, linpoints), deltaIsol, deltasol1, nusol1
+	#linearize dynamics
+	linpoints = Dynamics.linearize_dynamics(traj_points, sigmasol1, 1.0/(K+1), ProbInfo(iteration.problem))
+
+	update_model!(K, modeldata, traj_points, linpoints, sigmasol1)
+	return ProblemIteration(iteration.problem, sigmasol1, traj_points, linpoints, iteration.iter+1, modeldata), deltaIsol, deltasol1
 end
 
 function solve_problem(iprob::DescentProblem)
