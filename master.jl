@@ -58,14 +58,7 @@ module RocketlandDefns
         endpoint::SArray{Tuple{14},Float64,1,14}
         derivative::SArray{Tuple{14,21},Float64,2,294}
     end
-
-	struct ProblemIteration
-		problem::DescentProblem
-		sigma::Float64
-		about::Array{LinPoint,1}
-		dynam::Array{LinRes,1}
-	end
-	export DescentProblem, ProbInfo, LinPoint, LinRes, ProblemIteration
+	export DescentProblem, ProbInfo, LinPoint, LinRes
 end
 include("dynamics.jl")
 include("rocketland.jl")
