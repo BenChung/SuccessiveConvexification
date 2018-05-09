@@ -3,6 +3,7 @@ module Dynamics
     using ForwardDiff 
     using DiffResults
     using StaticArrays
+    using MathOptInterface
     using RocketlandDefns
     
     const mass_idx = 1
@@ -104,5 +105,44 @@ module Dynamics
         ctrl = vcat(state-ab.state, control_k-ab.control, control_kp-abn.control,sigma-sigHat)
         return dynam.derivative *ctrl + dynam.endpoint + relax
     end
-    export linearize_dynamics, next_step, LinRes
+    const MOI=MathOptInterface
+    function next_step(model::MOI.ModelLike, nst, 
+        dynam, ab, abn, state, control_k, control_kp, sigma, sigHat, relax)
+        # for row [derivative[row] 1 -1].[opt..., relax[row], nst[row]] = endpoint[row]
+        # or
+        # [derivative eye(14) -eye(14)]*[opt relax nst] + endpoint = 0 <- this one
+
+        #=  dynam.derivative*vcat(state, control_k, control_kp, sigma)
+                - dynam.derivative*vcat(ab.state, ab.control, abn.control,sigHat)
+                + dynam.endpoint + relax - nst = 0 =#
+
+        outp = Int[]
+        vars = MOI.VariableIndex[]
+        coeffs = Float64[]
+        consts = Float64[]
+        for row in 1:14
+            rrow = dynam.derivative[row,:]
+            rrelax = relax[row]
+            rrv = nst[row]
+            rconst = dynam.endpoint[row]-dot(rrow, vcat(ab.state, ab.control, abn.control,sigHat))
+            append!(outp, fill(row,23))
+
+            append!(vars, state)
+            append!(vars, control_k)
+            append!(vars, control_kp)
+            push!(vars, sigma)
+            append!(coeffs, rrow)
+
+            push!(vars, rrelax)
+            push!(coeffs, 1)
+
+            push!(vars, rrv)
+            push!(coeffs, -1)
+
+            push!(consts, rconst)
+        end
+
+        MOI.addconstraint!(model, MOI.VectorAffineFunction(outp, vars, coeffs, consts), MOI.Zeros(14))
+    end
+    export linearize_dynamics, next_step
 end
