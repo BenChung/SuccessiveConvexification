@@ -31,17 +31,17 @@ end
 function create_initial(problem::DescentProblem)
     K = problem.K
     initial_points = Array{LinPoint,1}(K+1)
-    for k=1:K+1
-        mk = (K+1-k)/(K+1) * problem.mwet + (k/(K+1))*problem.mdry
-        rIk = (K+1-k)/(K+1) * problem.rIi + (k/(K+1))*problem.rIf
-        vIk = (K+1-k)/(K+1) * problem.vIi + (k/(K+1))*problem.vIf
+    for k=0:K
+        mk = (K-k)/(K) * problem.mwet + (k/(K))*problem.mdry
+        rIk = (K-k)/(K) * problem.rIi + (k/(K))*problem.rIf
+        vIk = (K-k)/(K) * problem.vIi + (k/(K))*problem.vIf
 
         rot = rotation_between([1,0,0], -vIk)
         qBIk = @SVector [rot.w, rot.x, rot.y, rot.z]
         TBk = @SVector [mk*problem.g,0,0]
         state_init = vcat(mk,rIk,vIk,qBIk,(@SVector [0.0,0,0]))
         control_init = @SVector [mk*problem.g,0,0]
-        initial_points[k] = LinPoint(state_init, control_init)
+        initial_points[k+1] = LinPoint(state_init, control_init)
     end
     linpoints = Dynamics.linearize_dynamics(initial_points, problem.tf_guess, 1.0/(K+1), ProbInfo(problem))
     return ProblemIteration(problem, problem.tf_guess, initial_points, linpoints)

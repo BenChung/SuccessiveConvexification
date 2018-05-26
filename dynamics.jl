@@ -12,6 +12,8 @@ module Dynamics
     const qbi_idx = SVector(8,9,10,11)
     const omb_idx = SVector(12,13,14)
 
+    const thr_idx = SVector(1,2,3)
+
     struct IntegratorParameters{T}
         dt :: Float64
         uk :: SArray{Tuple{3}, T, 1, 3}
@@ -45,13 +47,14 @@ module Dynamics
                         omegab[3]  omegab[2] -omegab[1]  z         ]
     end
 
-    @inline function dx(output, state::StaticArrays.SArray{Tuple{14},T,1,14} where T, u::SArray{Tuple{3}, T, 1, 3} where T, mult, info::ProbInfo)
+    @inline function dx(output, state::StaticArrays.SArray{Tuple{14},T,1,14} where T, u::SArray{Tuple{5}, T, 1, 5} where T, mult, info::ProbInfo)
         qbi = state[qbi_idx]
         omb = state[omb_idx]
-        thr_acc = DCM(qbi) * u/state[mass_idx]
+        aero_control = SVector{3}(0,u[4],u[5])
+        thr_acc = DCM(qbi) * (u[thr_idx]/state[mass_idx] + aero_control)
         acc = thr_acc
         rot_vel = 0.5*Omega(omb)*qbi
-        rot_acc = info.jBi*(cross(info.rTB,u) - cross(omb,info.jB*omb))
+        rot_acc = info.jBi*(cross(info.rTB,u) + cross(info.rFB,aero_control) - cross(omb,info.jB*omb))
         output[:] = (@SVector [-info.a*norm(u), 
                      state[5],state[6],state[7], 
                      acc[1]-info.g0, acc[2], acc[3], 
