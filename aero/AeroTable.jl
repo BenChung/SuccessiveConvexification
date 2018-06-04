@@ -6,12 +6,13 @@ using kRPC.Remote.SpaceCenter
 totable = 1
 outp_a = 1
 outp_b = 1
-try 
+#try 
 vessel = ActiveVessel()
 flight = Flight(vessel)
 orbit = Orbit(vessel)
 body = Body(orbit)
 body_frame = ReferenceFrame(body)
+control = Control(vessel)
 
 function compute_reference_frame(body, lat, lon, alt::Float64)
     landing_position = SurfacePosition(body, lat, lon, body_frame)
@@ -31,7 +32,7 @@ function compute_reference_frame(body, lat, lon, alt::Float64)
 end
 guidance_frame = compute_reference_frame(body, Latitude(flight), Longitude(flight), 0.0)
 
-guidance_flight = Flight(vessel, referenceFrame=guidance_frame)
+guidance_flight = Flight(vessel)#, referenceFrame=guidance_frame)
 
 equivalent_vel = norm([Position(vessel, body_frame)...]) * RotationalSpeed(body)
 base_vector = Float64[0, 0, -equivalent_vel]
@@ -57,8 +58,76 @@ function compute_aero_forces_tform(bv,vv)
 	return compute_aero_forces(mach, alpha)
 end
 
+ctrls = kRPC.Remote.FerramControlSurface.FlightControls(vessel)
+map(x->kRPC.Remote.FerramControlSurface.ControlMaxDeflection!(x, 80.0f0), ctrls)
 
 
+function compute_control_force_defl(mach, aoamin, aoamax, minangle, maxangle, func)
+	kRPC.Remote.FerramControlSurface.ControlTimeConstant!(0.00000001)
+	func(control, minangle)
+	sleep(0.1)
+
+	forces = []
+	for aoa in aoamin:pi/64:aoamax
+		func(control, minangle)
+		sleep(0.2)
+		basf = kRPC.SendMessage(conn, compute_aero_forces(mach, aoa)[1])
+		for angle in minangle:0.1f0:maxangle
+			func(control, angle)
+			println(angle)
+			sleep(0.1)
+			frce = [[(basf .- kRPC.SendMessage(conn, compute_aero_forces(mach, aoa)[1]))...] for i=1:10]
+			mfrce = mean(frce)
+			unshift!(mfrce, aoa)
+			push!(forces, mfrce)
+		end
+	end
+	func(control, 0.0f0)
+	sleep(0.1)
+	return hcat(forces...)
+end
+
+function compute_control_force_drag(mach, angle, delta)
+	start_a = angle - delta/2
+	end_a = angle + delta/2
+	stepsize = delta/40
+	force = []
+	kRPC.Remote.FerramControlSurface.ControlTimeConstant!(0.00000001)
+	Pitch!(control, convert(Float32, angle/deg2rad(80.0)))
+	sleep(0.3)
+	basef = kRPC.SendMessage(conn, compute_aero_forces(mach, pi+angle)[1])
+	Pitch!(control, convert(Float32, start_a/deg2rad(80.0)))
+	sleep(0.3)
+	for ang in start_a:stepsize:end_a
+		Pitch!(control, convert(Float32, ang/deg2rad(80.0)))
+		sleep(0.05)
+		push!(force, [(kRPC.SendMessage(conn, compute_aero_forces(mach, pi+angle)[1]) .- basef)..., ang])
+	end
+	return basef,force
+end
+
+function find_apex(mach, angle, delta)
+	start_a = angle - delta/2
+	end_a = angle + delta/2
+	stepsize = delta/10
+	angles = Any[]
+	for ang in start_a:stepsize:end_a
+		bf,fr = compute_control_force_drag(mach, ang, delta)
+		fr = hcat(fr...)
+		sz = size(fr)[2]
+		which_angle = indmin(abs.((fr[1,1:sz-1] - fr[1,2:sz])./(fr[2,1:sz-1] - fr[2,2:sz])))
+		push!(angles, [bf,fr])
+	end
+	return angles
+end
+
+function fit_parabola(t,b)
+	inp = hcat(t.^2,t.^4)
+	println(inp, " ", b)
+	return inp\b
+end
+
+#=
 bv_step = 0.005
 vv_step = 0.1
 max_mach = 2
@@ -107,3 +176,4 @@ end
 finally
 kRPCDisconnect(conn)
 end
+=#
