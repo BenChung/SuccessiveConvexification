@@ -50,11 +50,21 @@ module Dynamics
     @inline function dx(output, state::StaticArrays.SArray{Tuple{14},T,1,14} where T, u::SArray{Tuple{5}, T, 1, 5} where T, mult, info::ProbInfo)
         qbi = state[qbi_idx]
         omb = state[omb_idx]
-        aero_control = SVector{3}(0,u[4],u[5])
-        thr_acc = DCM(qbi) * (u[thr_idx]/state[mass_idx] + aero_control)
-        acc = thr_acc
+        #=
+        #bodyaero_lut = (b.v, v.v) => (body_axis, velocity_axis)
+        body_up = DCM(qbi) * (SVector(1,0,0))
+        mach_v = state[5:7] ./ speed_of_sound
+        body_c, vel_c = bodyaero_lut(dot(body_up, mach_v), dot(mach_v, mach_v))
+        aero_acc = ((mach_v * vel_c + body_c * body_up)*speed_of_sound)/state[mass_idx]
+
+        #control_lut = (mach) => (lift_max, drag_max)
+        Lmax, Dmax = control_lut(mach)
+        aero_control = SVector{3}(0.5*Dmax*(2 + u[4]^2 + u[5]^2), Lmax*u[4],Lmax*u[5])
+        =#
+        thr_acc = DCM(qbi) * (u[thr_idx]/state[mass_idx] #= + aero_control =#)
+        acc = thr_acc # + aero_acc
         rot_vel = 0.5*Omega(omb)*qbi
-        rot_acc = info.jBi*(cross(info.rTB,u) + cross(info.rFB,aero_control) - cross(omb,info.jB*omb))
+        rot_acc = info.jBi*(cross(info.rTB,u) #= + cross(info.rFB,aero_control) =# - cross(omb,info.jB*omb))
         output[:] = (@SVector [-info.a*norm(u), 
                      state[5],state[6],state[7], 
                      acc[1]-info.g0, acc[2], acc[3], 
@@ -79,6 +89,28 @@ module Dynamics
         end
         return dynamics_sim
     end
+
+    struct StateInfo
+        controlK::SArray{Tuple{3}, Float64, 1, 3}
+        controlKp::SArray{Tuple{3}, Float64, 1, 3}
+        sigma::Float64
+        dt::Float64
+        pinfo::ProbInfo
+    end
+    
+    function control_dx(ipm, state, p, t)
+        dt = p.dt
+        lkm = (dt-t)/dt
+        lkp = t/dt
+        dx(ipm, SVector{14}(state), p.controlK*lkm + p.controlKp*lkp, p.sigma, p.pinfo)
+    end
+
+    function predict_state(initial_state, uk, up, sigma, dt, pinfo)
+        prob = ODEProblem(control_dx, vcat(initial_state, Float64[]), (0.0,dt), StateInfo(uk, up, sigma, dt, pinfo))
+        sol = solve(prob, Vern9(), save_everystep=false)
+        return sol[end]
+    end
+
 
     function linearize_segment(int,dt)
         sol = DifferentialEquations.solve!(int)
@@ -145,7 +177,25 @@ module Dynamics
             push!(consts, rconst)
         end
 
-        MOI.addconstraint!(model, MOI.VectorAffineFunction(outp, vars, coeffs, consts), MOI.Zeros(14))
+        return MOI.addconstraint!(model, MOI.VectorAffineFunction(outp, vars, coeffs, consts), MOI.Zeros(14))
+    end
+    function update_next_step(model::MOI.ModelLike, c, dynam, ab, abn, state, control_k, control_kp, sigma, sigHat)
+        #update derivative
+        modvars = vcat(state, control_k, control_kp, sigma)
+        var_col = 1
+        for varb in modvars
+            MOI.modifyconstraint!(model, c, MOI.MultirowChange(varb, collect(1:14), collect(dynam.derivative[:,var_col])))
+            var_col += 1
+        end
+
+        #update constants
+        consts = Float64[]
+        for row in 1:14
+            rrow = dynam.derivative[row,:]
+            rconst = dynam.endpoint[row]-dot(rrow, vcat(ab.state, ab.control, abn.control,sigHat))
+            push!(consts, rconst)
+        end
+        MOI.modifyconstraint!(model, c, MOI.VectorConstantChange(consts))
     end
     export linearize_dynamics, next_step
 end

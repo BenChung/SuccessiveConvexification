@@ -1,5 +1,6 @@
 module RocketlandDefns
 	using StaticArrays
+	using MathOptInterface
 
 	type DescentProblem
 	    g::Float64
@@ -35,13 +36,19 @@ module RocketlandDefns
 	    delTol::Float64
 	    tf_guess::Float64
 
+	    rK::Float64
+
 	    DescentProblem(;g=1.0,mdry=1.0,mwet=2.0,Tmin=2.0,Tmax=5.0,deltaMax=20.0,thetaMax=90.0,gammaGs=20.0,omMax=60.0,
 	                    jB=diagm([1e-2,1e-2,1e-2]), alpha=0.01,rTB=[-1e-2,0,0],rFB=[1e-2,0,0],rIi=[4.0,4.0,0.0],rIf=[0.0,0.0,0.0],
 	                    vIi=[0,-1,-1],vIf=[-0.1,0.0,0.0],qBIi=[1.0,0,0,0],qBIf=[1.0,0,0,0],wBi=[0.0,0.0,0.0],
-	                    wBf=[0.0,0,0],K=50,imax=15,wNu=1e5,wID=1e-3, wDS=1e-1, nuTol=1e-10, delTol = 1e-3, tf_guess=5.0) =
+	                    wBf=[0.0,0,0],K=50,imax=15,wNu=1e5,wID=1e-3, wDS=1e-1, nuTol=1e-10, delTol = 1e-3, tf_guess=5.0, r0=1000) =
 	        new(g,mdry,mwet,Tmin,Tmax,deltaMax,thetaMax,gammaGs,omMax,jB,alpha,rTB,rFB,rIi,rIf,vIi,vIf,
-	            qBIi,qBIf,wBi,wBf,K,imax,wNu,wID,wDS,nuTol,delTol,tf_guess)
+	            qBIi,qBIf,wBi,wBf,K,imax,wNu,wID,wDS,nuTol,delTol,tf_guess,r0)
 	end
+	base_prob = DescentProblem(g=9.82, mdry=66018, mwet=92960, Tmin=0.4*1000000, Tmax=1000000, jB=diagm([1.65e5,8.77e6,8.773e6]), 
+										  alpha=0.0003449, rTB=[-9.78571,0,0], rIi = [1000.0,1000.0,0.0], rIf=[0.0,0.0,0.0], vIi = [-50.0,0,0])
+	base_prob_scaled = DescentProblem(g=0.00982, mdry=0.710, mwet=1.0, Tmin=0.04302925989672978, Tmax=0.10757314974182443, jB=diagm([1.7749569707401032e-06, 9.434165232358004e-05, 9.437392426850258e-05]), 
+										  alpha=0.3449, rTB=[-0.00978571,0,0], rIi = [1.0,1.0,0.0], rIf=[0.0,0.0,0.0], vIi = [-0.05,0,0])
 
 	struct ProbInfo
 	    a::Float64
@@ -62,13 +69,33 @@ module RocketlandDefns
         derivative::SArray{Tuple{14,21},Float64,2,294}
     end
 
+	const MOI=MathOptInterface
+	struct ProblemModel
+		socp_model::MOI.ModelLike
+		dynamic_constraints::Array{MOI.ConstraintIndex,1}
+		thrust_constraint::MOI.ConstraintIndex
+		trust_constraints::Array{MOI.ConstraintIndex,1}
+		sigtr_constraint::MOI.ConstraintIndex
+		rk_constraint::MOI.ConstraintIndex
+		u_constraint::MOI.ConstraintIndex
+
+		xv::Array{MOI.VariableIndex,2}
+		uv::Array{MOI.VariableIndex,2}
+		sigmav::MOI.VariableIndex
+		nuSum::MOI.VariableIndex
+		nuv::Array{MOI.VariableIndex,2}
+		deltaI::MOI.VariableIndex
+		txv::Array{MOI.VariableIndex,1}
+	end
+
 	struct ProblemIteration
 		problem::DescentProblem
 		sigma::Float64
 		about::Array{LinPoint,1}
 		dynam::Array{LinRes,1}
+		model::ProblemModel
 	end
-	export DescentProblem, ProbInfo, LinPoint, LinRes, ProblemIteration
+	export DescentProblem, ProbInfo, LinPoint, LinRes, ProblemIteration, ProblemModel
 end
 include("dynamics.jl")
 include("rocketland.jl")
