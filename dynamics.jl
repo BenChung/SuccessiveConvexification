@@ -47,7 +47,7 @@ module Dynamics
                         omegab[3]  omegab[2] -omegab[1]  z         ]
     end
 
-    @inline function dx(output, state::StaticArrays.SArray{Tuple{14},T,1,14} where T, u::SArray{Tuple{5}, T, 1, 5} where T, mult, info::ProbInfo)
+    @inline function dx(output, state::StaticArrays.SArray{Tuple{14},T,1,14} where T, u::SArray{Tuple{3}, T, 1, 3} where T, mult, info::ProbInfo)
         qbi = state[qbi_idx]
         omb = state[omb_idx]
         #=
