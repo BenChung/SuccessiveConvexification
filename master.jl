@@ -1,6 +1,6 @@
 module RocketlandDefns
 	using StaticArrays
-	using MathOptInterface
+	using JuMP
 
 	type DescentProblem
 	    g::Float64
@@ -74,28 +74,29 @@ module RocketlandDefns
         derivative::SArray{Tuple{14,21},Float64,2,294}
     end
 
-	const MOI=MathOptInterface
 	struct ProblemModel
-		socp_model::MOI.ModelLike
-		dynamic_constraints::Array{MOI.ConstraintIndex,1}
-		thrust_constraint::MOI.ConstraintIndex
-		trust_constraints::Array{MOI.ConstraintIndex,1}
-		sigtr_constraint::MOI.ConstraintIndex
-		rk_constraint::MOI.ConstraintIndex
-		u_constraint::MOI.ConstraintIndex
-
-		xv::Array{MOI.VariableIndex,2}
-		uv::Array{MOI.VariableIndex,2}
-		sigmav::MOI.VariableIndex
-		nuSum::MOI.VariableIndex
-		nuv::Array{MOI.VariableIndex,2}
-		deltaI::MOI.VariableIndex
-		txv::Array{MOI.VariableIndex,1}
+		socp_model::JuMP.Model
+		xv::Array{JuMP.VariableRef,2}
+		uv::Array{JuMP.VariableRef,2}
+#=
+		dxv::Array{JuMP.VariableRef,2}
+		duv::Array{JuMP.VariableRef,2}
+		dsv::JuMP.VariableRef
+		=#
+		nuv::Array{JuMP.VariableRef,2}
+		nnv::JuMP.VariableRef
+#=
+		state_base::Array{JuMP.ConstraintRef,2}
+		control_base::Array{JuMP.ConstraintRef,2}
+		=#
+		dynamic_constraints::Vector{Vector{JuMP.ConstraintRef}}
+		pointing_constraints::Array{JuMP.ConstraintRef,1}
 	end
 
 	struct ProblemIteration
 		problem::DescentProblem
 		sigma::Float64
+
 		about::Array{LinPoint,1}
 		dynam::Array{LinRes,1}
 		model::ProblemModel
