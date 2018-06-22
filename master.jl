@@ -78,17 +78,13 @@ module RocketlandDefns
 		socp_model::JuMP.Model
 		xv::Array{JuMP.VariableRef,2}
 		uv::Array{JuMP.VariableRef,2}
-#=
 		dxv::Array{JuMP.VariableRef,2}
 		duv::Array{JuMP.VariableRef,2}
 		dsv::JuMP.VariableRef
-		=#
 		nuv::Array{JuMP.VariableRef,2}
 		nnv::JuMP.VariableRef
-#=
 		state_base::Array{JuMP.ConstraintRef,2}
 		control_base::Array{JuMP.ConstraintRef,2}
-		=#
 		dynamic_constraints::Vector{Vector{JuMP.ConstraintRef}}
 		pointing_constraints::Array{JuMP.ConstraintRef,1}
 	end
@@ -107,4 +103,5 @@ module RocketlandDefns
 	export DescentProblem, ProbInfo, LinPoint, LinRes, ProblemIteration, ProblemModel
 end
 include("dynamics.jl")
+include("initial_solve.jl")
 include("rocketland.jl")

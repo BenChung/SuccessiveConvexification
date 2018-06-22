@@ -2,13 +2,19 @@ module FirstRound
 using JuMP
 using RocketlandDefns
 using Mosek
+using MathOptInterface
+using MathOptInterfaceMosek
+using StaticArrays
+using Rotations
+import Dynamics
+const MOI=MathOptInterface
 
 function solve_initial(prob::DescentProblem)
     #computed constants
     kf = prob.K
     N = kf
     a = prob.alpha
-    tfs = 4
+    tfs = prob.tf_guess
     dt = tfs/kf
     mu = [((kf - k)/kf) * prob.mwet + (k/kf)*prob.mdry for k=0:kf]
     gamm0 = prob.Tmin
@@ -26,67 +32,75 @@ function solve_initial(prob::DescentProblem)
     n0 = [1 0 0]
     nf = [1 0 0]
     nsc = 20
-    wmf = 1
+    wkar = 100.0
 
-    m = Model(solver=MosekSolver())
+    tggs = tand(prob.gammaGs)
+    sqcm = (cosd(prob.thetaMax))
+    delMax = cosd(prob.deltaMax)
 
-    @variable(m, u[1:3,1:N+1])
+    m = Model(optimizer=MosekOptimizer(MSK_IPAR_INFEAS_REPORT_AUTO=1))
+
+    @variable(m, T[1:3,1:N+1])
     @variable(m, s[1:N+1])
     @variable(m, r[1:3,1:N+1])
-    @variable(m, rd[1:3,1:N+1])
-    @variable(m, z[1:N+1])
+    @variable(m, v[1:3,1:N+1])
+    @variable(m, ma[1:N+1])
+    @variable(m, ga[1:N+1])
+    @variable(m, kaR[1:N+1])
+    @variable(m, kaRr[1:N+1])
+    @variable(m, ar[1:3,1:N+1])
+    @variable(m, nkaR)
 
     #initial pos
     @constraint(m, r[i=1:3,1] .== r0[i])
-    @constraint(m, rd[i=1:3,1] .== v0[i])
+    @constraint(m, v[i=1:3,1] .== v0[i])
+    @constraint(m, ma[1] .== m0)
     @constraint(m, r[1:3,N+1] .== 0)
-    @constraint(m, rd[1:3,N+1] .== 0)
-    @constraint(m, 0 == u[2,N+1])
-    @constraint(m, 0 == u[3,N+1])
-    @constraint(m, z[1] == log(m0))
+    @constraint(m, v[1:3,N+1] .== 0)
+    @constraint(m, 0 == T[2,N+1])
+    @constraint(m, 0 == T[3,N+1])
 
-    @objective(m, Min, -z[N+1])
+    @objective(m, Min, -ma[N+1] + wkar*nkaR)
+    @constraint(m, [nkaR, kaRr[:]...] in MOI.SecondOrderCone(N+2))
+    @constraint(m, kaRr[:] .== kaR[:])
 
-    for i = 2:N+1
-        for j = 1:3
-            @constraint(m, r[j,i] == r[j,i-1] + dt/2 * (rd[j,i-1] + rd[j,i]) - dt^2/12 * (u[j,i] - u[j,i-1]))
-        end
+    for i=1:N
+        @constraint(m, ma[i+1] == ma[i]- a*(ga[i] + ga[i+1])*dt/2.0)
+        ak = T[:,i]/mu[i] + ar[:,i] + [-g0,0,0]
+        akp = T[:,i+1]/mu[i+1] + ar[:,i+1] + [-g0,0,0]
+        @constraint(m, r[j=1:3,i+1] .== r[j,i] + v[j,i]*dt + 1/3 * (ak[j] + 1/2*akp[j])*dt^2)
+        @constraint(m, v[j=1:3,i+1] .== v[j,i] + 1/2 * (ak[j] + akp[j])*dt)
     end
 
-    @constraint(m, rd[1,i=2:N+1] .== rd[1,i-1] + dt/2 * (u[1,i-1] + u[1,i]) - g0*dt)
-    @constraint(m, rd[2,i=2:N+1] .== rd[2,i-1] + dt/2 * (u[2,i-1] + u[2,i]))
-    @constraint(m, rd[3,i=2:N+1] .== rd[3,i-1] + dt/2 * (u[3,i-1] + u[3,i]))
-    @constraint(m, z[i=2:N+1] .== z[i-1] - a*dt/2 * (s[i-1] + s[i]))
-    for i = 1:N+1
-        @constraint(m, norm(u[1:3,i]) <= s[i])
+    for i=1:N+1
+        @constraint(m, mdry <= ma[i])
+        @constraint(m, [r[1,i]/tggs, r[2,i], r[3,i]] in MOI.SecondOrderCone(3))
+        @constraint(m, [ga[i], T[:,i]...] in MOI.SecondOrderCone(4))
+        @constraint(m, tmin <= ga[i])
+        @constraint(m, ga[i] <= tmax)
+        @constraint(m, ga[i]*sqcm <= T[1,i])
+        @constraint(m, [kaR[i], ar[:,i]...] in MOI.SecondOrderCone(4))
+    end
+    JuMP.optimize(m)
+
+    mass = JuMP.resultvalue.(ma)
+    ri = JuMP.resultvalue.(r)
+    vi = JuMP.resultvalue.(v)
+    Ti = JuMP.resultvalue.(T)
+
+    initial_points = Array{LinPoint,1}(N+1)
+    for k=1:N+1
+        mk = mass[k]
+        rIk = ri[:,k]
+        vIk = vi[:,k]
+
+        rot = rotation_between([1,0,0], -Ti[:,k])
+        qBIk = @SVector [rot.w, rot.x, rot.y, rot.z]
+        state_init = vcat(mk,rIk,vIk,qBIk,(@SVector [0.0,0,0]))
+        control_init = @SVector [norm(Ti[:,k]),0,0]
+        initial_points[k] = LinPoint(state_init, control_init)
     end
 
-    z0 = log(m0 - a * tmax * (Array(1:N+1)-1) * dt)
-    mu1 = tmin * exp(-z0[1:N+1])
-    mu2 = tmax * exp(-z0[1:N+1])
-    tggs = tand(gammags)
-
-    for i = 1:N+1
-        Ap = mu1[i]/2
-        A = sqrt(Ap)
-        b = -mu1[i]*(1 + z0[i])
-        c = (mu1[i]*z0[i]^2)/2 + mu1[i]*z0[i] + mu1[i]
-
-        @constraint(m, norm([(1 + b*z[i] - s[i] + c)/2, A*z[i]]) <= (1-b*z[i] + s[i] - c)/2)
-
-        @constraint(m, 0 <= s[i])
-        @constraint(m, s[i] <= mu2[i] * (1-(z[i] - z0[i])))
-
-        #glideslope
-        @constraint(m, tggs*norm(r[[2,3],i]) <= r[1,i]) 
-    end
-
-    @constraint(m, z0[i=1:N+1] .<= z[i])
-    @constraint(m, z[i=1:N+1] .<= log(m0 - a * tmin * (i - 1) * dt))
-
-    #SC modifications
-    solve(m)
-    println(getvalue(z)[N+1])
-    return getvalue(u)
+    return initial_points,Dynamics.linearize_dynamics(initial_points, prob.tf_guess, 1.0/(N+1), ProbInfo(prob))
 end
 end
