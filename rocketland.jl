@@ -29,94 +29,164 @@ function create_initial(problem::DescentProblem)
 end
 
 const MOI=MathOptInterface
-const SAT=MOI.ScalarAffineTerm
+const SA=MOI.ScalarAffineTerm
+const VA=MOI.VectorAffineTerm
 
 function build_model(prob, K, iterDynam, iterAbout, sigHat)
-	m = JuMP.Model(optimizer=MosekOptimizer(MSK_IPAR_INFEAS_REPORT_AUTO=1))
+	model = MosekOptimizer(MSK_IPAR_LOG=1,MSK_IPAR_INFEAS_REPORT_AUTO=1)
+	dcs = MOI.ConstraintIndex[]
+	state_nuc = MOI.ConstraintIndex[]
+
 	tggs = tand(prob.gammaGs)
-	sqcm = (1-cosd(prob.thetaMax))/2
+	sqcm = sqrt((1-cosd(prob.thetaMax))/2)
 	delMax = cosd(prob.deltaMax)
 
-	#@variable(m, dxv[1:state_dim, 1:K+1])
-	#@variable(m, duv[1:control_dim, 1:K+1])
-	@variable(m, xv[1:state_dim, 1:K+1])
-	@variable(m, uv[1:control_dim, 1:K+1])
-	@variable(m, sigma)
+	#main state variables
+	xv = reshape(MOI.addvariables!(model, state_dim*(K+1)), state_dim, K+1)
+	uv = reshape(MOI.addvariables!(model, control_dim*(K+1)), control_dim, K+1)
+	dxv = reshape(MOI.addvariables!(model, state_dim*(K+1)), state_dim, K+1)
+	duv = reshape(MOI.addvariables!(model, control_dim*(K+1)), control_dim, K+1)
+	nuv = reshape(MOI.addvariables!(model, state_dim*(K+1)), state_dim, K+1)
+	dsig = MOI.addvariable!(model)
 
-	@variable(m, nuv[1:state_dim, 1:K])
-	@variable(m, thr[1:K+1])
-	@variable(m, tot_thr)
+	# state helpers
+	xvh = reshape(MOI.addvariables!(model, 7*(K+1)), 7, K+1)
+	uvh = reshape(MOI.addvariables!(model, 3*(K+1)), 3, K+1)
 
-	@variable(m, delk)
-	@variable(m, delks[1:K+1])
-	@variable(m, dels)
-	@variable(m, nuNorm)
+	#relaxations
+	deltaI = MOI.addvariable!(model)
+	deltaIs = MOI.addvariables!(model,K+1)
+	deltasv = MOI.addvariable!(model)
+	nuSum = MOI.addvariable!(model)
+	tlb_viol = MOI.addvariables!(model, K+1)
+	tlb_sviol = MOI.addvariable!(model)
 
-	# set up the delta and solution variables
-	#@constraint m delta_xvs[j=1:state_dim,k=1:K+1] xv[j,k] - dxv[j,k] == iterAbout[k].state[j]
-	#@constraint m delta_uvs[j=1:control_dim,k=1:K+1] uv[j,k] - duv[j,k] == iterAbout[k].control[j]
+	txv = MOI.addvariables!(model, K+1)
+	sxv = MOI.addvariables!(model, K+1)
+	tsv = MOI.addvariable!(model)
+	ssv = MOI.addvariable!(model)
+	print(deltaIs[K+1])
 
-	# set up the objective 
+	#helpers
+	gs_h = MOI.addvariables!(model, K+1)
+	sqcm_h = MOI.addvariables!(model, K+1)
+	ommax_h = MOI.addvariables!(model, K+1)
+	uf_h = MOI.addvariables!(model, K+1)
+	ctrl_h = MOI.addvariables!(model, K+1)
+	rkv = MOI.addvariable!(model)
+	duvh = reshape(MOI.addvariables!(model, control_dim*(K+1)), control_dim, K+1)
+
+	#objective
+	# x[1,K+1] + prob.wNu*optVar2 + prob.wID*optVar1 + prob.wDS*sum(optDeltaS)
+	MOI.set!(model, MOI.ObjectiveFunction{MOI.ScalarAffineFunction{Float64}}(), 
+				    MOI.ScalarAffineFunction([SA(-1.0, xv[1,K+1]), SA(prob.wNu, nuSum), SA(prob.wID, deltaI), SA(prob.wNu, tlb_sviol), SA(prob.wDS, deltasv)],0.0))
+	MOI.set!(model, MOI.ObjectiveSense(), MOI.MinSense)
+
+	MOI.addconstraint!(model, MOI.VectorOfVariables([nuSum; reshape(nuv, length(nuv))]), MOI.SecondOrderCone(1+length(nuv)))
 	#=
-	for i=1:K+1
-		@constraint(m, [thr[i], uv[:,i]...] in MOI.SecondOrderCone(control_dim+1))
-	end
-	@constraint(m, tot_thr==sum(thr[:]))
-	=#
-	@objective(m, Min, -xv[mass_idx,K+1] + prob.wNu*nuNorm + prob.wID*delk + prob.wDS*dels) # todo
+	MOI.addconstraint!(model, MOI.VectorAffineFunction(
+		vcat([VA(i, SA(1.0, deltaIs[i])) for i=1:K+1], 
+			 [VA(i, SA(-1.0, txv[i])) for i=1:K+1]),fill(0.0, K+1)), MOI.Zeros(K+1))
+			 =#
+	MOI.addconstraint!(model, MOI.VectorOfVariables([deltaI; dxv[:,:]...; duv[:,:]...]), MOI.SecondOrderCone(1+(state_dim+control_dim)*(K+1)))
+	MOI.addconstraint!(model, MOI.VectorOfVariables([tlb_sviol; tlb_viol]), MOI.SecondOrderCone(1+(K+1)))
 
-	vars = [nuv[j,i] for j in 1:state_dim, i in 1:K]
-	@constraint(m, [nuNorm, vars...] in MOI.SecondOrderCone(1+state_dim*(K)))
+	#initial state constraints
+	eq_veccons(vect, val) = map((vr,vl)->MOI.addconstraint!(model, MOI.SingleVariable(vr), MOI.EqualTo(vl)), vect, val)
 
-	#initial state
-	@constraint(m, xv[mass_idx,1] == prob.mwet)
-	@constraint(m, xv[r_idx_it,1] .== prob.rIi)
-	@constraint(m, xv[v_idx_it,1] .== prob.vIi)
-	@constraint(m, xv[omb_idx_it,1] .== prob.wBi)
-	#@constraint(m, xv[qbi_idx_it,1] .== prob.qBIi)
+	MOI.addconstraint!(model, MOI.VectorAffineFunction(
+		vcat([[VA(i+(j-1)*state_dim, SA(1.0, xv[i,j])) for i=1:state_dim, j=1:K+1]...], 
+			 [[VA(i+(j-1)*state_dim, SA(-1.0, dxv[i,j])) for i=1:state_dim, j=1:K+1]...]), 
+		reshape([-iterAbout[j].state[i] for i=1:state_dim, j=1:K+1],state_dim*(K+1))), MOI.Zeros(state_dim*(K+1)))
 
-	#final state
-	@constraint(m, xv[r_idx_it,K+1] .== prob.rIf)
-	@constraint(m, xv[v_idx_it,K+1] .== prob.vIf)
-	@constraint(m, xv[omb_idx_it,K+1] .== prob.wBf)
-	@constraint(m, xv[qbi_idx_it,K+1] .== prob.qBIf)
-	@constraint(m, uv[2:3,K+1] .== [0,0])
+	MOI.addconstraint!(model, MOI.VectorAffineFunction(
+		vcat([[VA(i+(j-1)*control_dim, SA(1.0, uv[i,j])) for i=1:control_dim, j=1:K+1]...], 
+			 [[VA(i+(j-1)*control_dim, SA(-1.0, duv[i,j])) for i=1:control_dim, j=1:K+1]...]), 
+		reshape([-iterAbout[j].control[i] for i=1:control_dim, j=1:K+1],control_dim*(K+1))), MOI.Zeros(control_dim*(K+1)))
+
+	MOI.addconstraint!(model, MOI.SingleVariable(xv[mass_idx,1]), MOI.EqualTo(prob.mwet))
+	eq_veccons(xv[r_idx_it,1], prob.rIi)
+	eq_veccons(xv[v_idx_it,1], prob.vIi)
+	#eq_veccons(xv[qbi_idx_it,1],prob.qBIi)
+	eq_veccons(xv[omb_idx_it,1], prob.wBi)
+
+	#final state constraints
+	eq_veccons(xv[r_idx_it,K+1],prob.rIf)
+	eq_veccons(xv[v_idx_it,K+1],prob.vIf)
+	eq_veccons(xv[qbi_idx_it,K+1],prob.qBIf)
+	eq_veccons(xv[omb_idx_it,K+1],prob.wBf)
+	eq_veccons(uv[2:3,K+1], [0.0,0.0])
 
 	#dynamics
-	dynamic_constraints = Vector{Vector{JuMP.ConstraintRef}}()
 	for i=1:K
-		deriv = iterDynam[i].derivative
-		ep = iterDynam[i].endpoint - iterAbout[i+1].state
-		push!(dynamic_constraints, @constraint(m, deriv * [xv[:,i] - iterAbout[i].state;uv[:,i]-iterAbout[i].control;uv[:,i+1]-iterAbout[i+1].control;sigma - sigHat] + ep + nuv[:,i] .== xv[:,i+1]))
+		dk = iterDynam[i]
+		ab = iterAbout[i]
+		abn = iterAbout[i+1]
+		drv = dk.derivative
+		ep = dk.endpoint - abn.state
+		del = [dxv[:,i]; duv[:,i]; duv[:,i+1]; dsig]
+		vars = vcat([[map((coeff, vari) -> VA(r, SA(coeff, vari)), drv[r,:], del); VA(r, SA(1.0,nuv[r,i])); VA(r, SA(-1.0,dxv[r,i+1]))] for r in 1:state_dim]...)
+		push!(dcs, MOI.addconstraint!(model, MOI.VectorAffineFunction(vars, collect(ep)), MOI.Zeros(state_dim)))
 	end
 
-	#state constraints
-	pointing_constraints = Vector{JuMP.ConstraintRef}()
+	MOI.addconstraint!(model, MOI.VectorAffineFunction(vcat([VA(t, SA(1/tggs, xv[mass_idx,t])) for t=1:K+1], [VA(t, SA(-1.0, gs_h[t])) for t=1:K+1]), zeros(K+1)), MOI.Zeros(K+1))
+	MOI.addconstraint!(model, MOI.VectorAffineFunction([VA(t, SA(1.0, sqcm_h[t])) for t=1:K+1], fill(-sqcm, K+1)), MOI.Zeros(K+1))
+	MOI.addconstraint!(model, MOI.VectorAffineFunction([VA(t, SA(1.0, ommax_h[t])) for t=1:K+1], fill(-deg2rad(prob.omMax), K+1)), MOI.Zeros(K+1))
+
+	MOI.addconstraint!(model, MOI.VectorAffineFunction([[VA(t, SA(1/delMax,uv[1,t])) for t=1:K+1]; [VA(t, SA(-1.0,uf_h[t])) for t=1:K+1]], zeros(K+1)), MOI.Nonnegatives(K+1)) # u[1,i]/delMax-uf_h[i] >= 0
+	MOI.addconstraint!(model, MOI.VectorAffineFunction([VA(t, SA(1.0, uf_h[t])) for t=1:K+1], fill(-prob.Tmax, K+1)), MOI.Nonpositives(K+1)) # uf_h[i] - prob.Tmax <= 0
 
 	normed = map(lin->lin.control/norm(lin.control), iterAbout)
-	mdry = prob.mdry
+	consts = convert(Array{Float64,1},vcat(normed...))
+	println(size(consts))
+	tcs = MOI.addconstraint!(model, MOI.VectorAffineFunction([reshape([VA(t, SA(normed[t][i], uv[i,t])) for i=1:control_dim, t=1:K+1], control_dim*(K+1));
+															  [VA(t, SA(1.0, tlb_viol[t])) for t=1:K+1]], fill(-prob.Tmin, K+1)), MOI.Nonnegatives(K+1)) # prob.Tmin <= dot(Blin/Bnorm, u[1:3,i])
+
+	inds = [collect(3:4); collect(10:11); collect(12:14)]
 	for i=1:K+1
-		@constraint(m, mdry .<= xv[mass_idx,i])
-		@constraint(m, [xv[2,i]/tggs, xv[3,i], xv[4,i]] in MOI.SecondOrderCone(3))
-		@constraint(m, [sqcm, xv[10,i], xv[11,i]] in MOI.SecondOrderCone(3))
-		@constraint(m, [prob.omMax, xv[omb_idx_it,i]...] in MOI.SecondOrderCone(4))
+		#state constraints
+		if i > 1 # avoid bounding the initial state
+			MOI.addconstraint!(model, MOI.SingleVariable(xv[mass_idx,i]), MOI.GreaterThan(prob.mdry))
+		end
+		MOI.addconstraint!(model, MOI.VectorAffineFunction([map((i,v) -> VA(i, SA(1.0,v)), 1:10, [xv[inds,i]; uv[:,i]]); map((i,v) -> VA(i, SA(-1.0,v)), 1:10, [xvh[:,i]; uvh[:,i]])], fill(0.0,10)), MOI.Zeros(10))
+		MOI.addconstraint!(model, MOI.VectorOfVariables([gs_h[i]; xvh[1:2,i]]), MOI.SecondOrderCone(3)) # xv[2,i]/tggs >= norm(xv[3:4,i], gs_h[i]=xv[2,i]/tggs
+		MOI.addconstraint!(model, MOI.VectorOfVariables([sqcm_h[i]; xvh[3:4,i]]), MOI.SecondOrderCone(3)) # sqcm >= norm(xv[10:11,i])
+		MOI.addconstraint!(model, MOI.VectorOfVariables([ommax_h[i]; xvh[5:7,i]]), MOI.SecondOrderCone(4)) # deg2rad(prob.omMax) >= norm(xv[12:14,i])
 
-		#control constraints
-		@constraint(m, [prob.Tmax, uv[:,i]...] in MOI.SecondOrderCone(4))
-		@constraint(m, [uv[2,i]/delMax, uv[:,i]...] in MOI.SecondOrderCone(4))
+		#control constraint
+		MOI.addconstraint!(model, MOI.VectorOfVariables([uf_h[i]; uvh[1:3,i]]), MOI.SecondOrderCone(4)) # uf_h[i] >= norm(u[1:3,i])
+	end	
+	#trust region
+	# sum_i (state_i - x_i)^2 = sum_i x_i^2 - sum_i 2 x_i state_i + sum_i state_i^2) <= optEta1
+	# In standard form: x' Q x + a' x + b <= 0
+	# Q = id, a = [-2 state_i for i], b= -optEta1 + sum_i state_i^2
+	# we recast this as a rotated second order cone
+	# t + a' x = -b where t is a new var (1)
+	# x' id x <= 2*t <=> 
+	# 2*s*t >= ||x||^2 where s is a variable constrained to 1 (2)
+	#control trust region
+	#=
+	rkc = MOI.addconstraint!(model, MOI.SingleVariable(rkv), MOI.EqualTo(prob.rK))
 
-
-		@constraint(m, [1, delks[i], (xv[:,i]-iterAbout[i].state)/2..., (uv[:,i]-iterAbout[i].control)/2...] in MOI.RotatedSecondOrderCone(2+state_dim+control_dim))
-	end
-	for i=2:K
-        Blin = iterAbout[i].control[1:3]
-        Bnorm = norm(Blin)
-		push!(pointing_constraints, @constraint(m, prob.Tmin <= dot(Blin, uv[1:3,i])/Bnorm))
-	end
-	@constraint(m, [delk, delks...] in MOI.SecondOrderCone(K+2))
-	#@constraint(m, [100, [duv[j,i]/2 for j in 1:control_dim, i in 1:K+1]...] in MOI.SecondOrderCone(1+control_dim*(K+1)))
-	@constraint(m, [1, dels, sigma - sigHat] in MOI.RotatedSecondOrderCone(3))
-	return m, xv, uv, sigma
+	linv = reshape(hcat([iterAbout[i].control for i=1:K+1]...), control_dim*(K+1))
+	rshp = reshape(uv, length(uv))
+	dkc = MOI.addconstraint!(model, MOI.VectorAffineFunction([collect(1:control_dim*(K+1)); collect(1:control_dim*(K+1))], 
+		[reshape(uv, length(uv)); uvh2], [fill(1, control_dim*(K+1)); fill(-1.0, control_dim*(K+1))], -linv), MOI.Zeros(control_dim*(K+1)))
+	MOI.addconstraint!(model, MOI.VectorOfVariables([rkv; uvh2]), MOI.SecondOrderCone(1+length(uv)))
+		=#
+	#time trust region: same gubbins (QCP -> SOCP via a rotated SOC constraint) 
+	# Want: (sigma - sigHat)^2 <= deltasv <=> sigma^2 -2 sigma sigmaHat + sigHat^2 - deltasv <= 0
+	# Q = id, a = -2 sigHat, b=-deltasv + sigHat^2 (look ma no vectors) <=>
+	# t + -2 sigHat sigma - deltasv = -b_c (3)
+	# 2*s*t >= ||sigma||^2 where s = 1 (4)
+	rkc = MOI.addconstraint!(model, MOI.SingleVariable(rkv), MOI.EqualTo(0.0))
+	MOI.addconstraint!(model, MOI.VectorAffineFunction([
+		[VA(i+(j-1)*control_dim, SA(1.0,duv[i,j])) for i=1:control_dim, j=1:K+1]...,
+		[VA(i+(j-1)*control_dim, SA(-1.0, duvh[i,j])) for i=1:control_dim, j=1:K+1]...], fill(0.0,(K+1)*control_dim)), MOI.Zeros((K+1)*control_dim))
+	MOI.addconstraint!(model, MOI.VectorOfVariables([rkv; duvh[:,:]...]), MOI.SecondOrderCone(1+length(uv)))
+	MOI.addconstraint!(model, MOI.SingleVariable(ssv), MOI.EqualTo(1.0))
+	MOI.addconstraint!(model, MOI.VectorOfVariables([ssv, deltasv, dsig]), MOI.RotatedSecondOrderCone(3))
+	model,xv
 	#return ProblemModel(m, xv, uv, dxv, duv, dsv, nuv, nuNorm, delta_xvs, delta_uvs, dynamic_constraints, pointing_constraints)
 end
 
