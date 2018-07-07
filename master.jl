@@ -1,6 +1,6 @@
 module RocketlandDefns
 	using StaticArrays
-	using JuMP
+	using MathOptInterface
 
 	type DescentProblem
 	    g::Float64
@@ -45,8 +45,8 @@ module RocketlandDefns
 
 	    DescentProblem(;g=1.0,mdry=1.0,mwet=2.0,Tmin=2.0,Tmax=5.0,deltaMax=20.0,thetaMax=90.0,gammaGs=20.0,omMax=60.0,
 	                    jB=diagm([1e-2,1e-2,1e-2]), alpha=0.01,rTB=[-1e-2,0,0],rFB=[1e-2,0,0],rIi=[4.0,4.0,0.0],rIf=[0.0,0.0,0.0],
-	                    vIi=[0,-1,-1],vIf=[-0.1,0.0,0.0],qBIi=[1.0,0,0,0],qBIf=[1.0,0,0,0],wBi=[0.0,0.0,0.0],
-	                    wBf=[0.0,0,0],K=50,imax=15,wNu=1e5,wID=1e-3, wDS=1e-1, nuTol=1e-10, delTol = 1e-3, tf_guess=5.0, ri=1.0, rh0=0.0, rh1=0.25, rh2=0.90, alph=2.0, bet=33.2) =
+	                    vIi=[0,-2,2],vIf=[-0.1,0.0,0.0],qBIi=[1.0,0,0,0],qBIf=[1.0,0,0,0],wBi=[0.0,0.0,0.0],
+	                    wBf=[0.0,0,0],K=50,imax=15,wNu=1e5,wID=1e-3, wDS=1e-1, nuTol=1e-10, delTol = 1e-3, tf_guess=5.0, ri=1.0, rh0=0.0, rh1=0.25, rh2=0.90, alph=2.0, bet=3.2) =
 	        new(g,mdry,mwet,Tmin,Tmax,deltaMax,thetaMax,gammaGs,omMax,jB,alpha,rTB,rFB,rIi,rIf,vIi,vIf,
 	            qBIi,qBIf,wBi,wBf,K,imax,wNu,wID,wDS,nuTol,delTol,tf_guess,ri,rh0,rh1,rh2, alph, bet)
 	end
@@ -74,19 +74,22 @@ module RocketlandDefns
         derivative::SArray{Tuple{14,21},Float64,2,294}
     end
 
+    const MOI=MathOptInterface
 	struct ProblemModel
-		socp_model::JuMP.Model
-		xv::Array{JuMP.VariableRef,2}
-		uv::Array{JuMP.VariableRef,2}
-		dxv::Array{JuMP.VariableRef,2}
-		duv::Array{JuMP.VariableRef,2}
-		dsv::JuMP.VariableRef
-		nuv::Array{JuMP.VariableRef,2}
-		nnv::JuMP.VariableRef
-		state_base::Array{JuMP.ConstraintRef,2}
-		control_base::Array{JuMP.ConstraintRef,2}
-		dynamic_constraints::Vector{Vector{JuMP.ConstraintRef}}
-		pointing_constraints::Array{JuMP.ConstraintRef,1}
+		socp_model::MOI.ModelLike
+		xv::Array{MOI.VariableIndex,2}
+		uv::Array{MOI.VariableIndex,2}
+		dxv::Array{MOI.VariableIndex,2}
+		duv::Array{MOI.VariableIndex,2}
+		dsv::MOI.VariableIndex
+		nuv::Array{MOI.VariableIndex,2}
+		tnv::Array{MOI.VariableIndex,1}
+		rkv::MOI.VariableIndex
+		state_base::MOI.ConstraintIndex
+		control_base::MOI.ConstraintIndex
+		dynamic_constraints::Vector{MOI.ConstraintIndex}
+		pointing_constraints::MOI.ConstraintIndex
+		trust_region::MOI.ConstraintIndex
 	end
 
 	struct ProblemIteration
@@ -99,6 +102,7 @@ module RocketlandDefns
 
 		iter::Int64
 		rk::Float64
+		cost::Float64
 	end
 	export DescentProblem, ProbInfo, LinPoint, LinRes, ProblemIteration, ProblemModel
 end

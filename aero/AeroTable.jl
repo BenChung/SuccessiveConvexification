@@ -48,6 +48,19 @@ function compute_aero_forces(mach, aoa)
 	return kRPC.Remote.SpaceCenter.Delayed.SimulateAerodynamicForceAt(guidance_flight, body, (0.0,0.0,0.0), ((velocity_vec + base_vector)...)), velocity_vec
 end
 
+cforce = kRPC.kPC[]
+dp = Float64[]
+for aoa=-10:0.1:10
+	cll,vec = compute_aero_forces(0.5, deg2rad(aoa))
+	push!(cforce, cll)
+	b = [cosd(aoa), sind(aoa), 0.0]
+	v = [0.5,0.0,0.0]
+	n = norm(cross(cross(b,v),b))
+	println(n-sqrt(1-(dot(b,v)/norm(v))^2))
+	push!(dp, norm(cross(b,v))/norm(v))
+end
+res = (x->x[2]).(kRPC.SendMessage(conn, cforce))
+
 function compute_aero_forces_tform(bv,vv)
 	if (vv>0)
 		alpha = acos(bv)

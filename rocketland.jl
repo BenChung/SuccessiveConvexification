@@ -1,5 +1,4 @@
 module Rocketland
-using JuMP
 using Mosek
 using MathOptInterface
 using MathOptInterfaceMosek
@@ -25,7 +24,7 @@ function create_initial(problem::DescentProblem)
     K = problem.K
     initial_points,linpoints = FirstRound.solve_initial(problem)
     model = build_model(problem, K, linpoints, initial_points, problem.tf_guess)
-    return model #return ProblemIteration(problem, problem.tf_guess, initial_points, linpoints, model, 0, Inf)
+    return ProblemIteration(problem, problem.tf_guess, initial_points, linpoints, model, 0, Inf, Inf)
 end
 
 const MOI=MathOptInterface
@@ -60,6 +59,7 @@ function build_model(prob, K, iterDynam, iterAbout, sigHat)
 	nuSum = MOI.addvariable!(model)
 	tlb_viol = MOI.addvariables!(model, K+1)
 	tlb_sviol = MOI.addvariable!(model)
+	thr_tot = MOI.addvariable!(model)
 
 	txv = MOI.addvariables!(model, K+1)
 	sxv = MOI.addvariables!(model, K+1)
@@ -74,12 +74,13 @@ function build_model(prob, K, iterDynam, iterAbout, sigHat)
 	uf_h = MOI.addvariables!(model, K+1)
 	ctrl_h = MOI.addvariables!(model, K+1)
 	rkv = MOI.addvariable!(model)
+	rkv2 = MOI.addvariable!(model)
 	duvh = reshape(MOI.addvariables!(model, control_dim*(K+1)), control_dim, K+1)
 
 	#objective
 	# x[1,K+1] + prob.wNu*optVar2 + prob.wID*optVar1 + prob.wDS*sum(optDeltaS)
 	MOI.set!(model, MOI.ObjectiveFunction{MOI.ScalarAffineFunction{Float64}}(), 
-				    MOI.ScalarAffineFunction([SA(-1.0, xv[1,K+1]), SA(prob.wNu, nuSum), SA(prob.wID, deltaI), SA(prob.wNu, tlb_sviol), SA(prob.wDS, deltasv)],0.0))
+				    MOI.ScalarAffineFunction([SA(1.0, thr_tot), SA(prob.wNu, nuSum), SA(100.0, tlb_sviol)],0.0))
 	MOI.set!(model, MOI.ObjectiveSense(), MOI.MinSense)
 
 	MOI.addconstraint!(model, MOI.VectorOfVariables([nuSum; reshape(nuv, length(nuv))]), MOI.SecondOrderCone(1+length(nuv)))
@@ -88,18 +89,19 @@ function build_model(prob, K, iterDynam, iterAbout, sigHat)
 		vcat([VA(i, SA(1.0, deltaIs[i])) for i=1:K+1], 
 			 [VA(i, SA(-1.0, txv[i])) for i=1:K+1]),fill(0.0, K+1)), MOI.Zeros(K+1))
 			 =#
-	MOI.addconstraint!(model, MOI.VectorOfVariables([deltaI; dxv[:,:]...; duv[:,:]...]), MOI.SecondOrderCone(1+(state_dim+control_dim)*(K+1)))
+	MOI.addconstraint!(model, MOI.VectorOfVariables([deltaI; dxv[:,:]...]), MOI.SecondOrderCone(1+(state_dim)*(K+1)))
+	MOI.addconstraint!(model, MOI.VectorOfVariables([thr_tot; uv[:,:]...]), MOI.SecondOrderCone(1+(control_dim)*(K+1)))
 	MOI.addconstraint!(model, MOI.VectorOfVariables([tlb_sviol; tlb_viol]), MOI.SecondOrderCone(1+(K+1)))
 
 	#initial state constraints
 	eq_veccons(vect, val) = map((vr,vl)->MOI.addconstraint!(model, MOI.SingleVariable(vr), MOI.EqualTo(vl)), vect, val)
 
-	MOI.addconstraint!(model, MOI.VectorAffineFunction(
+	scr = MOI.addconstraint!(model, MOI.VectorAffineFunction(
 		vcat([[VA(i+(j-1)*state_dim, SA(1.0, xv[i,j])) for i=1:state_dim, j=1:K+1]...], 
 			 [[VA(i+(j-1)*state_dim, SA(-1.0, dxv[i,j])) for i=1:state_dim, j=1:K+1]...]), 
-		reshape([-iterAbout[j].state[i] for i=1:state_dim, j=1:K+1],state_dim*(K+1))), MOI.Zeros(state_dim*(K+1)))
+		reshape([-iterAbout[j].state[i] for j=1:K+1, i=1:state_dim],state_dim*(K+1))), MOI.Zeros(state_dim*(K+1)))
 
-	MOI.addconstraint!(model, MOI.VectorAffineFunction(
+	ccr = MOI.addconstraint!(model, MOI.VectorAffineFunction(
 		vcat([[VA(i+(j-1)*control_dim, SA(1.0, uv[i,j])) for i=1:control_dim, j=1:K+1]...], 
 			 [[VA(i+(j-1)*control_dim, SA(-1.0, duv[i,j])) for i=1:control_dim, j=1:K+1]...]), 
 		reshape([-iterAbout[j].control[i] for i=1:control_dim, j=1:K+1],control_dim*(K+1))), MOI.Zeros(control_dim*(K+1)))
@@ -133,15 +135,17 @@ function build_model(prob, K, iterDynam, iterAbout, sigHat)
 	MOI.addconstraint!(model, MOI.VectorAffineFunction([VA(t, SA(1.0, sqcm_h[t])) for t=1:K+1], fill(-sqcm, K+1)), MOI.Zeros(K+1))
 	MOI.addconstraint!(model, MOI.VectorAffineFunction([VA(t, SA(1.0, ommax_h[t])) for t=1:K+1], fill(-deg2rad(prob.omMax), K+1)), MOI.Zeros(K+1))
 
-	MOI.addconstraint!(model, MOI.VectorAffineFunction([[VA(t, SA(1/delMax,uv[1,t])) for t=1:K+1]; [VA(t, SA(-1.0,uf_h[t])) for t=1:K+1]], zeros(K+1)), MOI.Nonnegatives(K+1)) # u[1,i]/delMax-uf_h[i] >= 0
-	MOI.addconstraint!(model, MOI.VectorAffineFunction([VA(t, SA(1.0, uf_h[t])) for t=1:K+1], fill(-prob.Tmax, K+1)), MOI.Nonpositives(K+1)) # uf_h[i] - prob.Tmax <= 0
+	MOI.addconstraint!(model, MOI.VectorAffineFunction([[VA(t, SA(1/delMax,uv[1,t])) for t=1:K+1]; [VA(t, SA(-1.0,uf_h[t])) for t=1:K+1]], zeros(K+1)), MOI.Nonnegatives(K+1)) # u[1,i]/delMax >= uf_h[i]
+	MOI.addconstraint!(model, MOI.VectorAffineFunction([VA(t, SA(1.0, uf_h[t])) for t=1:K+1], fill(-prob.Tmax, K+1)), MOI.Nonpositives(K+1)) # uf_h[i] <= prob.Tmax
 
 	normed = map(lin->lin.control/norm(lin.control), iterAbout)
 	consts = convert(Array{Float64,1},vcat(normed...))
 	println(size(consts))
-	tcs = MOI.addconstraint!(model, MOI.VectorAffineFunction([reshape([VA(t, SA(normed[t][i], uv[i,t])) for i=1:control_dim, t=1:K+1], control_dim*(K+1));
-															  [VA(t, SA(1.0, tlb_viol[t])) for t=1:K+1]], fill(-prob.Tmin, K+1)), MOI.Nonnegatives(K+1)) # prob.Tmin <= dot(Blin/Bnorm, u[1:3,i])
-
+	tcs = MOI.addconstraint!(model, MOI.VectorAffineFunction([reshape([VA(t, SA(0.0, uv[i,t])) for i=1:control_dim, t=1:K+1], control_dim*(K+1));
+															  [VA(t, SA(0.0, tlb_viol[t])) for t=1:K+1]], fill(-prob.Tmin, K+1)), MOI.Nonnegatives(K+1)) # prob.Tmin <= dot(Blin/Bnorm, u[1:3,i])
+	for t=1:K+1
+		MOI.modify!(model, tcs, MOI.MultirowChange(tlb_viol[t], [(t,1.0)]))
+	end
 	inds = [collect(3:4); collect(10:11); collect(12:14)]
 	for i=1:K+1
 		#state constraints
@@ -156,38 +160,18 @@ function build_model(prob, K, iterDynam, iterAbout, sigHat)
 		#control constraint
 		MOI.addconstraint!(model, MOI.VectorOfVariables([uf_h[i]; uvh[1:3,i]]), MOI.SecondOrderCone(4)) # uf_h[i] >= norm(u[1:3,i])
 	end	
-	#trust region
-	# sum_i (state_i - x_i)^2 = sum_i x_i^2 - sum_i 2 x_i state_i + sum_i state_i^2) <= optEta1
-	# In standard form: x' Q x + a' x + b <= 0
-	# Q = id, a = [-2 state_i for i], b= -optEta1 + sum_i state_i^2
-	# we recast this as a rotated second order cone
-	# t + a' x = -b where t is a new var (1)
-	# x' id x <= 2*t <=> 
-	# 2*s*t >= ||x||^2 where s is a variable constrained to 1 (2)
-	#control trust region
-	#=
-	rkc = MOI.addconstraint!(model, MOI.SingleVariable(rkv), MOI.EqualTo(prob.rK))
-
-	linv = reshape(hcat([iterAbout[i].control for i=1:K+1]...), control_dim*(K+1))
-	rshp = reshape(uv, length(uv))
-	dkc = MOI.addconstraint!(model, MOI.VectorAffineFunction([collect(1:control_dim*(K+1)); collect(1:control_dim*(K+1))], 
-		[reshape(uv, length(uv)); uvh2], [fill(1, control_dim*(K+1)); fill(-1.0, control_dim*(K+1))], -linv), MOI.Zeros(control_dim*(K+1)))
-	MOI.addconstraint!(model, MOI.VectorOfVariables([rkv; uvh2]), MOI.SecondOrderCone(1+length(uv)))
-		=#
-	#time trust region: same gubbins (QCP -> SOCP via a rotated SOC constraint) 
-	# Want: (sigma - sigHat)^2 <= deltasv <=> sigma^2 -2 sigma sigmaHat + sigHat^2 - deltasv <= 0
-	# Q = id, a = -2 sigHat, b=-deltasv + sigHat^2 (look ma no vectors) <=>
-	# t + -2 sigHat sigma - deltasv = -b_c (3)
-	# 2*s*t >= ||sigma||^2 where s = 1 (4)
-	rkc = MOI.addconstraint!(model, MOI.SingleVariable(rkv), MOI.EqualTo(0.0))
+	rkc = MOI.addconstraint!(model, MOI.ScalarAffineFunction([SA(1.0,rkv)], 0.0), MOI.EqualTo(1.0))
+	#MOI.addconstraint!(model, MOI.SingleVariable(rkv), MOI.LessThan(0.0))
 	MOI.addconstraint!(model, MOI.VectorAffineFunction([
-		[VA(i+(j-1)*control_dim, SA(1.0,duv[i,j])) for i=1:control_dim, j=1:K+1]...,
+		[VA(i+(j-1)*control_dim, SA(1.0,duv[i,j])) for i=1:control_dim, j=1:K+1]...;
 		[VA(i+(j-1)*control_dim, SA(-1.0, duvh[i,j])) for i=1:control_dim, j=1:K+1]...], fill(0.0,(K+1)*control_dim)), MOI.Zeros((K+1)*control_dim))
-	MOI.addconstraint!(model, MOI.VectorOfVariables([rkv; duvh[:,:]...]), MOI.SecondOrderCone(1+length(uv)))
-	MOI.addconstraint!(model, MOI.SingleVariable(ssv), MOI.EqualTo(1.0))
-	MOI.addconstraint!(model, MOI.VectorOfVariables([ssv, deltasv, dsig]), MOI.RotatedSecondOrderCone(3))
-	model,xv
-	#return ProblemModel(m, xv, uv, dxv, duv, dsv, nuv, nuNorm, delta_xvs, delta_uvs, dynamic_constraints, pointing_constraints)
+	MOI.addconstraint!(model, MOI.VectorOfVariables([rkv; duvh[:,:]...; dsig]), MOI.SecondOrderCone(2+length(uv)))
+
+	MOI.addconstraint!(model, MOI.ScalarAffineFunction([SA(4.0,rkv2),SA(-1.0,rkv)], 0.0), MOI.EqualTo(0.0))
+	#MOI.addconstraint!(model, MOI.VectorOfVariables([rkv2, dsig]), MOI.SecondOrderCone(2))
+	#MOI.addconstraint!(model, MOI.SingleVariable(ssv), MOI.EqualTo(1.0))
+	#MOI.addconstraint!(model, MOI.VectorOfVariables([ssv, deltasv, dsig]), MOI.RotatedSecondOrderCone(3))
+	return ProblemModel(model, xv, uv, dxv, duv, dsig, nuv, tlb_viol, rkv, scr, ccr, dcs, tcs, rkc)
 end
 
 const MOI=MathOptInterface
@@ -198,73 +182,109 @@ function solve_step(iteration::ProblemIteration)
 	uv = iteration.model.uv
 	dxv = iteration.model.dxv
 	duv = iteration.model.duv
-	dsv = iteration.model.dsv
+	dsig = iteration.model.dsv
+	nuv = iteration.model.nuv
+	rkv = iteration.model.rkv
+	ctrl_viol = iteration.model.tnv
 	state_base = iteration.model.state_base
 	control_base = iteration.model.control_base
 	dynamic_constraints = iteration.model.dynamic_constraints
-	pointing_constraints = iteration.model.pointing_constraints
+	pointing_constraint = iteration.model.pointing_constraints
+	trust_region = iteration.model.trust_region
 
 	iterDynam = iteration.dynam
 	iterAbout = iteration.about
 	sigHat = iteration.sigma
-
-	moimod = iteration.model.socp_model.moibackend
-	for i=1:K+1
-		st = iterAbout[i].state
-		ct = iterAbout[i].control
-		for j=1:state_dim
-			#MOI.modifyconstraint!(moimod, state_base[j,i].index, MOI.EqualTo(st[j]))
+	model = iteration.model.socp_model
+	MOI.modify!(model, state_base, MOI.VectorConstantChange(reshape([-iterAbout[j].state[i] for i=1:state_dim, j=1:K+1],state_dim*(K+1))))
+	MOI.modify!(model, control_base, MOI.VectorConstantChange(reshape([-iterAbout[j].control[i] for i=1:control_dim, j=1:K+1],control_dim*(K+1))))
+	for i=1:K
+		cstr = dynamic_constraints[i]
+		derv = iterDynam[i].derivative
+		ep = iterDynam[i].endpoint - iterAbout[i+1].state
+		del = [dxv[:,i]; duv[:,i]; duv[:,i+1]; dsig]
+		for j=1:length(del)
+			vari = del[j]
+			MOI.modify!(model, cstr, MOI.MultirowChange(vari, [(r,derv[r,j]) for r = 1:state_dim]))
 		end
-		for j=1:control_dim
-			#MOI.modifyconstraint!(moimod, control_base[j,i].index, MOI.EqualTo(ct[j]))
-		end
+		MOI.modify!(model, cstr, MOI.VectorConstantChange(collect(ep)))
 	end
-	for i=2:K
+	for i=1:K+1
 		#pointing 
 		normed = iterAbout[i].control/norm(iterAbout[i].control)
 		for j=1:control_dim
-			#MOI.modifyconstraint!(moimod, pointing_constraints[i-1].index, MOI.ScalarCoefficientChange(uv[j,i].index, -normed[j]))
+			MOI.modify!(model, pointing_constraint, MOI.MultirowChange(uv[j,i], [(i, normed[j])]))
 		end
 	end
-
-	for i=1:K
-		dk = iterDynam[i]
-		deriv = iterDynam[i].derivative
-		endpoint = iterDynam[i].endpoint - iterAbout[i+1].state
-		cstrs = dynamic_constraints[i]
-		vrs = [dxv[:,i];duv[:,i];duv[:,i+1];dsv]
-		#deriv * vrs [...] = -endpoint
-		for j=1:state_dim # go row-wise through the matrix
-			for vi = 1:length(vrs)
-				#MOI.modifyconstraint!(moimod, cstrs[j].index, MOI.ScalarCoefficientChange(vrs[vi].index, deriv[j,vi]))
-			end
-			#MOI.modifyconstraint!(moimod, cstrs[j].index, MOI.EqualTo(-endpoint[j]))
-		end
+	println(iteration.rk)
+	if iteration.rk != Inf
+		MOI.modify!(model, trust_region, MOI.ScalarCoefficientChange(rkv, 1.0/iteration.rk))
 	end
-
-	JuMP.optimize(iteration.model.socp_model)
-	xs = JuMP.resultvalue.(xv)
-	us = JuMP.resultvalue.(uv)
-	traj_points = Array{LinPoint,1}(K+1)
-	ds = JuMP.resultvalue.(dsv)
-	for k=1:K+1
-		traj_points[k] = LinPoint(xs[:,k], us[:,k])
-	end
-	println(ds)
-	#linpoints = Dynamics.linearize_dynamics(traj_points, prob.tf_guess, 1.0/(K+1), ProbInfo(prob))
-
-	return xs, us
-
-    #=
+	MOI.optimize!(model)
 	status = MOI.get(model, MOI.TerminationStatus())
 	if status != MOI.Success
 		println(status)
-		return
+		if status != MOI.SlowProgress
+			return
+		end
 	end	
 	result_status = MOI.get(model, MOI.PrimalStatus())
 	if result_status != MOI.FeasiblePoint
 	    error("Solver ran successfully did not return a feasible point. The problem may be infeasible.")
 	end
+
+	println(MathOptInterface.get(model, MathOptInterface.VariablePrimal(), rkv))
+	xs = reshape(MathOptInterface.get(model, MathOptInterface.VariablePrimal(), reshape(xv, length(xv))), state_dim, K+1)
+	us = reshape(MathOptInterface.get(model, MathOptInterface.VariablePrimal(), reshape(uv, length(uv))), control_dim, K+1)
+	nus = reshape(MathOptInterface.get(model, MathOptInterface.VariablePrimal(), reshape(nuv, length(nuv))), state_dim, K+1)
+	dus = reshape(MathOptInterface.get(model, MathOptInterface.VariablePrimal(), reshape(duv, length(duv))), control_dim, K+1)
+	ds = MathOptInterface.get(model, MathOptInterface.VariablePrimal(), dsig)
+	viol = MathOptInterface.get(model, MathOptInterface.VariablePrimal(), ctrl_viol)
+	traj_points = Array{LinPoint,1}(K+1)
+	for k=1:K+1
+		traj_points[k] = LinPoint(xs[:,k], us[:,k])
+	end
+	infos = ProbInfo(prob)
+	pv = 0.0
+	for k=1:K
+		ps = Dynamics.predict_state(xs[:,k], us[:,k], us[:,k+1], sigHat + ds, 1.0/(K+1), infos)
+		pv += norm(xs[:,k+1] - ps)
+	end
+	ic = norm(collect(min(norm(us[:,k])-prob.Tmin,0.0) for k=1:K+1))
+	println("costs $(xs[1,K+1]) $pv $ds $(sigHat+ds) $(norm(us)) $(xs[:,K+1]) $(iteration.rk)")
+	cost = norm(us) + prob.wNu*pv + 100.0*ic
+	linpoints = Dynamics.linearize_dynamics(traj_points, sigHat + ds, 1.0/(K+1), ProbInfo(prob))
+	if iteration.rk == Inf
+		next_rk = prob.ri
+	else
+		jK = iteration.cost
+		lk = norm(us) + prob.wNu*sum(norm(nus[:,k]) for k=1:K+1) + 100.0*norm(viol)
+		djk = jK - cost
+		dlk = jK - lk
+		rhk = djk/dlk
+		if rhk < prob.rh0
+			println("reject $rhk $djk $jK $(sum(norm(dus))) $(iteration.rk)")
+			return ProblemIteration(prob, iteration.sigma, iteration.about, iteration.dynam, iteration.model, iteration.iter+1, iteration.rk/prob.alph, iteration.cost)
+		else
+			case = 0
+			if rhk < prob.rh1
+				next_rk = iteration.rk/prob.alph
+				case = 1
+			elseif prob.rh1 <= rhk && rhk < prob.rh2
+				next_rk = iteration.rk
+				case = 2
+			else 
+				next_rk = prob.bet*iteration.rk
+				case = 3
+			end
+			println("accept $rhk $cost $dlk $rhk $case")
+		end
+	end
+	linpoints = Dynamics.linearize_dynamics(traj_points, sigHat + ds, 1.0/(K+1), ProbInfo(prob))
+	return ProblemIteration(prob, sigHat + ds, traj_points, linpoints, iteration.model, iteration.iter+1, next_rk, cost)
+
+	#return xs, us
+    #=
 	xsol1 = reshape(MOI.get(model, MOI.VariablePrimal(), reshape(xv, length(xv))), state_dim, K+1)
 	usol1 = reshape(MOI.get(model, MOI.VariablePrimal(), reshape(uv, length(uv))), control_dim, K+1)
 	sigmasol1 = MOI.get(model, MOI.VariablePrimal(), sigmav)
