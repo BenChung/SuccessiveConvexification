@@ -54,7 +54,6 @@ function build_model(prob, K, iterDynam, iterAbout, sigHat)
 
 	#relaxations
 	deltaI = MOI.addvariable!(model)
-	deltaIs = MOI.addvariables!(model,K+1)
 	deltasv = MOI.addvariable!(model)
 	nuSum = MOI.addvariable!(model)
 	tlb_viol = MOI.addvariables!(model, K+1)
@@ -65,7 +64,6 @@ function build_model(prob, K, iterDynam, iterAbout, sigHat)
 	sxv = MOI.addvariables!(model, K+1)
 	tsv = MOI.addvariable!(model)
 	ssv = MOI.addvariable!(model)
-	print(deltaIs[K+1])
 
 	#helpers
 	gs_h = MOI.addvariables!(model, K+1)
@@ -80,7 +78,8 @@ function build_model(prob, K, iterDynam, iterAbout, sigHat)
 	#objective
 	# x[1,K+1] + prob.wNu*optVar2 + prob.wID*optVar1 + prob.wDS*sum(optDeltaS)
 	MOI.set!(model, MOI.ObjectiveFunction{MOI.ScalarAffineFunction{Float64}}(), 
-				    MOI.ScalarAffineFunction([SA(1.0, thr_tot), SA(prob.wNu, nuSum), SA(100.0, tlb_sviol)],0.0))
+				    MOI.ScalarAffineFunction([SA(-1.0, xv[1,K+1]), SA(prob.wNu, nuSum), SA(prob.wID, deltaI),
+				    						  SA(prob.wDS, deltasv), SA(100.0, tlb_sviol)],0.0))
 	MOI.set!(model, MOI.ObjectiveSense(), MOI.MinSense)
 
 	MOI.addconstraint!(model, MOI.VectorOfVariables([nuSum; reshape(nuv, length(nuv))]), MOI.SecondOrderCone(1+length(nuv)))
@@ -89,8 +88,11 @@ function build_model(prob, K, iterDynam, iterAbout, sigHat)
 		vcat([VA(i, SA(1.0, deltaIs[i])) for i=1:K+1], 
 			 [VA(i, SA(-1.0, txv[i])) for i=1:K+1]),fill(0.0, K+1)), MOI.Zeros(K+1))
 			 =#
-	MOI.addconstraint!(model, MOI.VectorOfVariables([deltaI; dxv[:,:]...]), MOI.SecondOrderCone(1+(state_dim)*(K+1)))
-	MOI.addconstraint!(model, MOI.VectorOfVariables([thr_tot; uv[:,:]...]), MOI.SecondOrderCone(1+(control_dim)*(K+1)))
+			 println("vvar1 : $(deltaI)")
+	MOI.addconstraint!(model, MOI.VectorOfVariables([deltaI; dxv[:,:]...; duv[:,:]...]), 
+								MOI.SecondOrderCone(1+(state_dim + control_dim)*(K+1)))
+	MOI.addconstraint!(model, MOI.VectorOfVariables([deltasv, dsig]), MOI.SecondOrderCone(2))
+	#MOI.addconstraint!(model, MOI.VectorOfVariables([thr_tot; uv[:,:]...]), MOI.SecondOrderCone(1+(control_dim)*(K+1)))
 	MOI.addconstraint!(model, MOI.VectorOfVariables([tlb_sviol; tlb_viol]), MOI.SecondOrderCone(1+(K+1)))
 
 	#initial state constraints
@@ -131,7 +133,7 @@ function build_model(prob, K, iterDynam, iterAbout, sigHat)
 		push!(dcs, MOI.addconstraint!(model, MOI.VectorAffineFunction(vars, collect(ep)), MOI.Zeros(state_dim)))
 	end
 
-	MOI.addconstraint!(model, MOI.VectorAffineFunction(vcat([VA(t, SA(1/tggs, xv[mass_idx,t])) for t=1:K+1], [VA(t, SA(-1.0, gs_h[t])) for t=1:K+1]), zeros(K+1)), MOI.Zeros(K+1))
+	MOI.addconstraint!(model, MOI.VectorAffineFunction(vcat([VA(t, SA(1/tggs, xv[2,t])) for t=1:K+1], [VA(t, SA(-1.0, gs_h[t])) for t=1:K+1]), zeros(K+1)), MOI.Zeros(K+1))
 	MOI.addconstraint!(model, MOI.VectorAffineFunction([VA(t, SA(1.0, sqcm_h[t])) for t=1:K+1], fill(-sqcm, K+1)), MOI.Zeros(K+1))
 	MOI.addconstraint!(model, MOI.VectorAffineFunction([VA(t, SA(1.0, ommax_h[t])) for t=1:K+1], fill(-deg2rad(prob.omMax), K+1)), MOI.Zeros(K+1))
 
@@ -140,12 +142,10 @@ function build_model(prob, K, iterDynam, iterAbout, sigHat)
 
 	normed = map(lin->lin.control/norm(lin.control), iterAbout)
 	consts = convert(Array{Float64,1},vcat(normed...))
-	println(size(consts))
+	
 	tcs = MOI.addconstraint!(model, MOI.VectorAffineFunction([reshape([VA(t, SA(0.0, uv[i,t])) for i=1:control_dim, t=1:K+1], control_dim*(K+1));
-															  [VA(t, SA(0.0, tlb_viol[t])) for t=1:K+1]], fill(-prob.Tmin, K+1)), MOI.Nonnegatives(K+1)) # prob.Tmin <= dot(Blin/Bnorm, u[1:3,i])
-	for t=1:K+1
-		MOI.modify!(model, tcs, MOI.MultirowChange(tlb_viol[t], [(t,1.0)]))
-	end
+															  [VA(t, SA(1.0, tlb_viol[t])) for t=1:K+1]], fill(-prob.Tmin, K+1)), MOI.Nonnegatives(K+1)) # prob.Tmin <= dot(Blin/Bnorm, u[1:3,i])
+
 	inds = [collect(3:4); collect(10:11); collect(12:14)]
 	for i=1:K+1
 		#state constraints
@@ -160,17 +160,13 @@ function build_model(prob, K, iterDynam, iterAbout, sigHat)
 		#control constraint
 		MOI.addconstraint!(model, MOI.VectorOfVariables([uf_h[i]; uvh[1:3,i]]), MOI.SecondOrderCone(4)) # uf_h[i] >= norm(u[1:3,i])
 	end	
-	rkc = MOI.addconstraint!(model, MOI.ScalarAffineFunction([SA(1.0,rkv)], 0.0), MOI.EqualTo(1.0))
+	rkc = MOI.addconstraint!(model, MOI.ScalarAffineFunction([SA(1.0,rkv)], 0.0), MOI.EqualTo(Inf))
 	#MOI.addconstraint!(model, MOI.SingleVariable(rkv), MOI.LessThan(0.0))
 	MOI.addconstraint!(model, MOI.VectorAffineFunction([
 		[VA(i+(j-1)*control_dim, SA(1.0,duv[i,j])) for i=1:control_dim, j=1:K+1]...;
 		[VA(i+(j-1)*control_dim, SA(-1.0, duvh[i,j])) for i=1:control_dim, j=1:K+1]...], fill(0.0,(K+1)*control_dim)), MOI.Zeros((K+1)*control_dim))
-	MOI.addconstraint!(model, MOI.VectorOfVariables([rkv; duvh[:,:]...; dsig]), MOI.SecondOrderCone(2+length(uv)))
+	#MOI.addconstraint!(model, MOI.VectorOfVariables([rkv; duvh[:,:]...; dsig]), MOI.SecondOrderCone(2+length(uv)))
 
-	MOI.addconstraint!(model, MOI.ScalarAffineFunction([SA(4.0,rkv2),SA(-1.0,rkv)], 0.0), MOI.EqualTo(0.0))
-	#MOI.addconstraint!(model, MOI.VectorOfVariables([rkv2, dsig]), MOI.SecondOrderCone(2))
-	#MOI.addconstraint!(model, MOI.SingleVariable(ssv), MOI.EqualTo(1.0))
-	#MOI.addconstraint!(model, MOI.VectorOfVariables([ssv, deltasv, dsig]), MOI.RotatedSecondOrderCone(3))
 	return ProblemModel(model, xv, uv, dxv, duv, dsig, nuv, tlb_viol, rkv, scr, ccr, dcs, tcs, rkc)
 end
 
@@ -230,6 +226,7 @@ function solve_step(iteration::ProblemIteration)
 	end	
 	result_status = MOI.get(model, MOI.PrimalStatus())
 	if result_status != MOI.FeasiblePoint
+		println(result_status)
 	    error("Solver ran successfully did not return a feasible point. The problem may be infeasible.")
 	end
 
@@ -264,7 +261,8 @@ function solve_step(iteration::ProblemIteration)
 		rhk = djk/dlk
 		if rhk < prob.rh0
 			println("reject $rhk $djk $jK $(sum(norm(dus))) $(iteration.rk)")
-			return ProblemIteration(prob, iteration.sigma, iteration.about, iteration.dynam, iteration.model, iteration.iter+1, iteration.rk/prob.alph, iteration.cost)
+			next_rk = 1.0
+			#return ProblemIteration(prob, iteration.sigma, iteration.about, iteration.dynam, iteration.model, iteration.iter+1, iteration.rk/prob.alph, iteration.cost)
 		else
 			case = 0
 			if rhk < prob.rh1
