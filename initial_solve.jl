@@ -1,12 +1,12 @@
 module FirstRound
 using JuMP
-using RocketlandDefns
+using ..RocketlandDefns
 using Mosek
 using MathOptInterface
 using MathOptInterfaceMosek
 using StaticArrays
 using Rotations
-import Dynamics
+import ..Dynamics
 const MOI=MathOptInterface
 
 function solve_initial(prob::DescentProblem)
@@ -38,7 +38,7 @@ function solve_initial(prob::DescentProblem)
     sqcm = (cosd(prob.thetaMax))
     delMax = cosd(prob.deltaMax)
 
-    m = Model(optimizer=MosekOptimizer(MSK_IPAR_INFEAS_REPORT_AUTO=1))
+    m = Model(with_optimizer(MosekOptimizer,MSK_IPAR_INFEAS_REPORT_AUTO=1))
 
     @variable(m, T[1:3,1:N+1])
     @variable(m, s[1:N+1])
@@ -103,4 +103,23 @@ function solve_initial(prob::DescentProblem)
 
     return initial_points,Dynamics.linearize_dynamics(initial_points, prob.tf_guess, 1.0/(N+1), ProbInfo(prob))
 end
+
+function linear_initial(problem::DescentProblem)
+    K = problem.K
+    initial_points = Array{LinPoint,1}(K+1)
+    for k=0:K
+        mk = (K-k)/(K) * problem.mwet + (k/(K))*problem.mdry
+        rIk = (K-k)/(K) * problem.rIi + (k/(K))*problem.rIf
+        vIk = (K-k)/(K) * problem.vIi + (k/(K))*problem.vIf
+
+        rot = rotation_between([1,0,0], -vIk)
+        qBIk = @SVector [rot.w, rot.x, rot.y, rot.z]
+        TBk = @SVector [mk*problem.g,0,0]
+        state_init = vcat(mk,rIk,vIk,qBIk,(@SVector [0.0,0,0]))
+        control_init = @SVector [mk*problem.g,0,0]
+        initial_points[k+1] = LinPoint(state_init, control_init)
+    end
+    return initial_points,Dynamics.linearize_dynamics(initial_points, problem.tf_guess, 1.0/(K+1), ProbInfo(problem))
+end
+
 end

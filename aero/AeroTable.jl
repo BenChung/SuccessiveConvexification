@@ -1,12 +1,14 @@
 using Interpolations
 using kRPC
 using CSV
+using LinearAlgebra
+using DataFrames
 conn = kRPCConnect("Aerodata")
 using kRPC.Remote.SpaceCenter
 totable = 1
 outp_a = 1
 outp_b = 1
-#try 
+try 
 vessel = ActiveVessel()
 flight = Flight(vessel)
 orbit = Orbit(vessel)
@@ -45,21 +47,34 @@ speed_of_sound = SpeedOfSound(flight)
 function compute_aero_forces(mach, aoa)
 	velocity = mach*speed_of_sound
 	velocity_vec = broadcast(*, Float64[-cos(aoa),sin(aoa),0], velocity)
-	return kRPC.Remote.SpaceCenter.Delayed.SimulateAerodynamicForceAt(guidance_flight, body, (0.0,0.0,0.0), ((velocity_vec + base_vector)...)), velocity_vec
+	return kRPC.Remote.SpaceCenter.Delayed.SimulateAerodynamicForceAt(guidance_flight, body, (0.0,0.0,0.0), ((velocity_vec + base_vector)...,)), velocity_vec
 end
 
-cforce = kRPC.kPC[]
-dp = Float64[]
-for aoa=-10:0.1:10
-	cll,vec = compute_aero_forces(0.5, deg2rad(aoa))
-	push!(cforce, cll)
-	b = [cosd(aoa), sind(aoa), 0.0]
-	v = [0.5,0.0,0.0]
-	n = norm(cross(cross(b,v),b))
-	println(n-sqrt(1-(dot(b,v)/norm(v))^2))
-	push!(dp, norm(cross(b,v))/norm(v))
+function sweep_aero()
+	cforce = kRPC.kPC[]
+	drg = Vector{Float64}[]
+	lft = Vector{Float64}[]
+	aoal = Float64[]
+	machl = Float64[]
+	for mach=0.0:0.1:1.0
+		for aoa=0:1:45
+			cll,bv = compute_aero_forces(mach, deg2rad(aoa))
+			push!(cforce, cll)
+			normbv = bv/norm(bv)
+			push!(drg, normbv)
+			push!(lft, cross(cross([1.0,0.0,0.0], normbv),normbv))
+			push!(aoal, aoa)
+			push!(machl, mach)
+		end
+	end
+	res = kRPC.SendMessage(conn, cforce)
+	hcat(([aoal[i], machl[i], if !isnan(dot(res[i], drg[i])) dot(res[i], drg[i]) else 0.0 end, if !isnan(dot(res[i], lft[i])) dot(res[i], lft[i]) else 0.0 end] for i=1:length(res))...)
 end
-res = (x->x[2]).(kRPC.SendMessage(conn, cforce))
+
+aero_force = sweep_aero()'
+aero_df = DataFrame(aoa=aero_force[:,1], mach=aero_force[:,2], drag=aero_force[:,3], lift=aero_force[:,4])
+CSV.write("lift_drag.csv", aero_df)
+#=
 
 function compute_aero_forces_tform(bv,vv)
 	if (vv>0)
@@ -184,9 +199,9 @@ for result in totable
 	outp_a[map_bv[result[1][1]], map_machsq[result[1][2]]] = result[2][1]
 	outp_b[map_bv[result[1][1]], map_machsq[result[1][2]]] = result[2][2]
 end
-
+=#
+=#
 
 finally
 kRPCDisconnect(conn)
 end
-=#

@@ -3,8 +3,9 @@ module Dynamics
     using ForwardDiff 
     using DiffResults
     using StaticArrays
+    using LinearAlgebra
     using MathOptInterface
-    using RocketlandDefns
+    using ..RocketlandDefns
     
     const mass_idx = 1
     const r_idx = SVector(2,3,4)
