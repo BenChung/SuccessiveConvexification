@@ -6,6 +6,7 @@ module Dynamics
     using LinearAlgebra
     using MathOptInterface
     using ..RocketlandDefns
+    using ..Aerodynamics
     
     const mass_idx = 1
     const r_idx = SVector(2,3,4)
@@ -40,7 +41,7 @@ module Dynamics
                         (2*(p3 - p4))        (2*(p5 + p6))       (1-2*(q1^2 + q2^2)) ]
     end
 
-    @inline function Omega{T}(omegab::SArray{Tuple{3}, T, 1, 3})
+    @inline function Omega(omegab::SArray{Tuple{3}, T, 1, 3}) where T
         z = zero(T)
         return @SMatrix [z        -omegab[1] -omegab[2] -omegab[3];
                         omegab[1] z           omegab[3] -omegab[2];
@@ -51,19 +52,12 @@ module Dynamics
     @inline function dx(output, state::StaticArrays.SArray{Tuple{14},T,1,14} where T, u::SArray{Tuple{3}, T, 1, 3} where T, mult, info::ProbInfo)
         qbi = state[qbi_idx]
         omb = state[omb_idx]
-        #=
-        #bodyaero_lut = (b.v, v.v) => (body_axis, velocity_axis)
-        body_up = DCM(qbi) * (SVector(1,0,0))
-        mach_v = state[5:7] ./ speed_of_sound
-        body_c, vel_c = bodyaero_lut(dot(body_up, mach_v), dot(mach_v, mach_v))
-        aero_acc = ((mach_v * vel_c + body_c * body_up)*speed_of_sound)/state[mass_idx]
 
-        #control_lut = (mach) => (lift_max, drag_max)
-        Lmax, Dmax = control_lut(mach)
-        aero_control = SVector{3}(0.5*Dmax*(2 + u[4]^2 + u[5]^2), Lmax*u[4],Lmax*u[5])
-        =#
+        aerf = Aerodynamics.aero_force(info.aero,Array(DCM(qbi) * (SVector(1,0,0))),state[5:7],info.sos)
+
         thr_acc = DCM(qbi) * (u[thr_idx]/state[mass_idx] #= + aero_control =#)
-        acc = thr_acc # + aero_acc
+        aero_acc = aerf/state[mass_idx]
+        acc = thr_acc + aero_acc
         rot_vel = 0.5*Omega(omb)*qbi
         rot_acc = info.jBi*(cross(info.rTB,u) #= + cross(info.rFB,aero_control) =# - cross(omb,info.jB*omb))
         output[:] = (@SVector [-info.a*norm(u), 
@@ -116,7 +110,7 @@ module Dynamics
     function linearize_segment(int,dt)
         sol = DifferentialEquations.solve!(int)
         x,dp = extract_local_sensitivities(int.sol,dt)
-        return LinRes(SVector{14}(x),SMatrix{14,21}(hcat(dp...)) + hcat(eye(14), zeros(14,7)))
+        return LinRes(SVector{14}(x),SMatrix{14,21}(hcat(dp...)) + hcat(Matrix(1.0I, 14, 14), zeros(14,7)))
     end
 
     function linearize_dynamics(states::Array{LinPoint,1}, sigma_lin::Float64, dt::Float64, info::ProbInfo)
@@ -127,7 +121,7 @@ module Dynamics
         nstate = states[2]
         ip = vcat(zeros(14), cstate.control, nstate.control, sigma_lin)
         prob = ODELocalSensitivityProblem(fun, vcat(cstate.state, Float64[]), (0.0,dt), ip)
-        integrator = init(prob, Vern9(),abstol=1e-14,reltol=1e-14, save_everystep=false)
+        integrator = init(prob, Vern9(),abstol=1e-14,reltol=1e-14, save_everystep=false, force_dtmin = true)
         for i=1:length(states)-1
             cstate = states[i]
             nstate = states[i+1]

@@ -5,6 +5,7 @@ using MathOptInterfaceMosek
 using Rotations
 using StaticArrays
 using LinearAlgebra
+using ForwardDiff
 using ..RocketlandDefns
 import ..Dynamics
 import ..FirstRound
@@ -160,18 +161,30 @@ function build_model(prob, K, iterDynam, iterAbout, sigHat)
 															  [VA(t, SA(1.0, tlb_viol[t])) for t=1:K+1]], fill(-prob.Tmin, K+1)), MOI.Nonnegatives(K+1)) # prob.Tmin <= dot(Blin/Bnorm, u[1:3,i]) + viol
 
 	#non-convex
-	#cosd(45) <= dot(Dynamics.DCM(xv[qbi_idx_it,i]) * [0,1,0], xv[v_idx_it,i]*norm(xv[v_idx_it,i])) # the [0,1,0] is intentional; want sin(aoa)
+	# ||v||^2_2 - dot(Dynamics.DCM(xv[qbi_idx_it,i]) * [-1,0,0], xv[v_idx_it,i])^2 <= 2*maxDp/rho
 	# q0 = quat[1]
 	# q1 = quat[2]
 	# q2 = quat[3]
 	# q3 = quat[4]
-	# qv1 = (2*(q1 * q2 - q0 * q3))*norm(xv[v_idx_it,i])
-	# qv2 = (1-2*(q1^2 + q3^2))*norm(xv[v_idx_it,i])
-	# qv3 = (2*(q2 * q3 + q0 * q1))*norm(xv[v_idx_it,i])
-	# maxDp + viol[i] <= qv1 * xv[v_idx_it[1],i] + qv2 * xv[v_idx_it[2],i] + qv3 * xv[v_idx_it[3],i]
-	# 0 <= qv1 * xv[v_idx_it[1],i] + qv2 * xv[v_idx_it[2],i] + qv3 * xv[v_idx_it[3],i] - maxDp - viol[i]
-	pcs = MOI.addconstraint!(model, MOI.VectorAffineFunction([vcat(([VA(t, SA(0.0, v)) for v in xv[v_idx_it,t]] for t=1:K+1)...); [VA(t, SA(1.0, aoa_viol[t])) for t=1:K+1]], 
-		fill(-prob.maxDp, K+1)), MOI.Nonnegatives(K+1))
+	# qv1 = -(1-2*(q2^2 + q3^2))
+	# qv2 = -(2*(q1 * q2 + q0 * q3))
+	# qv3 = -(2*(q1 * q3 - q0 * q2))
+	# ||xv[v_idx_it,i]||^2_2 <= sqV
+	# sqV - [dot(q,v)^2|_q <= (2*maxDp/rho)^2
+	# sqV - [dot(q,v)^2|_q <= (2*maxDp/rho)^2
+	# sqV - [dot(q,v)^2|_q - (2*maxDp/rho)^2 <= 0
+	# sqV - (base_{v,q} + grad*{dv,dq}) - (2*maxDp/rho)^2 <= 0
+	# sqV - grad*{dv,dq} - (2*maxDp/rho)^2 - base_{v,q} <= 0
+	sqVs = MOI.addvariables!(model, K+1)
+	oneHalves = MOI.addvariables!(model, K+1)
+	for i=1:K+1
+		MOI.addconstraint!(model, MOI.SingleVariable(oneHalves[i]), MOI.EqualTo(0.5))
+		MOI.addconstraint!(model, MOI.VectorOfVariables([sqVs[i]; oneHalves[i]; xv[v_idx_it,i]]), MOI.RotatedSecondOrderCone(5))
+	end
+	pcs = MOI.addconstraint!(model, MOI.VectorAffineFunction([
+		vcat(([VA(t, SA(0.0, v)) for v in xv[v_idx_it,t]] for t=1:K+1)...,
+			 ([VA(t, SA(0.0, v)) for v in xv[qbi_idx_it,t]] for t=1:K+1)...); [VA(t, SA(1.0, sqVs[t])) for t=1:K+1]; [VA(t, SA(1.0, aoa_viol[t])) for t=1:K+1]], 
+		fill(-(2*prob.dpMax/prob.rho)^2, K+1)), MOI.Nonpositives(K+1))
 
 	for i=1:K+1
 		MOI.addconstraint!(model, MOI.SingleVariable(tlb_viol[i]), MOI.GreaterThan(0.0))
@@ -205,6 +218,10 @@ function build_model(prob, K, iterDynam, iterAbout, sigHat)
 end
 
 const MOI=MathOptInterface
+function vsq_sub_dotsq(inp::Vector{T}) where T
+	return dot(inp[1:3], Dynamics.DCM(SVector{4}(inp[4:7]))*[1.0,0,0])^2
+end
+
 function solve_step(iteration::ProblemIteration)
 	prob = iteration.problem
 	K = prob.K
@@ -248,21 +265,21 @@ function solve_step(iteration::ProblemIteration)
 			MOI.modify!(model, pointing_constraint, MOI.MultirowChange(uv[j,i], [(i, normed[j])]))
 		end
 	end
+	vidxes = vcat(v_idx_it,qbi_idx_it)
+	ncons = Array{Float64,1}(K+1)
 	for i=1:K+1
 		#aoa
-		quat = iterAbout[i].state[qbi_idx_it]
-		vel = norm(iterAbout[i].state[v_idx_it])
-		q0 = quat[1]
-		q1 = quat[2]
-		q2 = quat[3]
-		q3 = quat[4]
-		qv1 = (2*(q1 * q2 - q0 * q3))*vel
-		qv2 = (1-2*(q1^2 + q3^2))*vel
-		qv3 = (2*(q2 * q3 + q0 * q1))*vel
-		MOI.modify!(model, aoa_constraint, MOI.MultirowChange(xv[v_idx_it[1],i], [(i, qv1)]))
-		MOI.modify!(model, aoa_constraint, MOI.MultirowChange(xv[v_idx_it[2],i], [(i, qv2)]))
-		MOI.modify!(model, aoa_constraint, MOI.MultirowChange(xv[v_idx_it[3],i], [(i, qv3)]))
+		state = iterAbout[i].state[vidxes]
+		vars = xv[vidxes,i]
+		base = vsq_sub_dotsq(state)
+		grad = -ForwardDiff.gradient(vsq_sub_dotsq, state)
+		ncons[i] =  -(2*prob.dpMax/prob.rho)^2 - base
+		for p in zip(vars,grad)
+			MOI.modify!(model, aoa_constraint, MOI.MultirowChange(p[1],[(i, p[2])]))
+		end
 	end
+	MOI.modify!(model, aoa_constraint, MOI.VectorConstantChange(ncons))
+
 	println(iteration.rk)
 	if iteration.rk != Inf
 		MOI.set!(model, MOI.ConstraintSet(), trust_region, MOI.LessThan(iteration.rk))
@@ -389,10 +406,14 @@ function plot_solution(ip::ProblemIteration)
 			minimum(pt.state[3] for pt in ip.about))
 	pmin = min(minimum(pt.state[2] for pt in ip.about),
 			minimum(pt.state[4] for pt in ip.about))
-	p=plot(xs,ys, xlims = (tmin,tmax), layout=2)
+
+	thr = [norm(pt.control)/ip.problem.Tmax for pt in ip.about]
+	println(thr)
+	p=plot(xs,ys, xlims = (tmin,tmax), layout=2, legend=false)
 	for pt in ip.about
+		dp = dot(Dynamics.DCM(SVector{4}(pt.state[qbi_idx_it]))*[1.0,0,0], pt.state[v_idx_it])/norm(pt.state[v_idx_it])
+		println(dp)
 		dv = Dynamics.DCM(SVector{4}(pt.state[qbi_idx_it]))*[1.0,0,0]
-		println(norm(dv))
 		xls = [pt.state[3] pt.state[4]; pt.state[3]+dv[2]/3 pt.state[4]+dv[3]/3]
 		yls = [pt.state[2] pt.state[2]; pt.state[2]+dv[1]/3 pt.state[2]+dv[1]/3]
 		plot!(p,xls,yls, layout=2)

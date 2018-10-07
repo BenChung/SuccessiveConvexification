@@ -35,19 +35,13 @@ end
 guidance_frame = compute_reference_frame(body, Latitude(flight), Longitude(flight), 0.0)
 
 guidance_flight = Flight(vessel)#, referenceFrame=guidance_frame)
-
-equivalent_vel = norm([Position(vessel, body_frame)...]) * RotationalSpeed(body)
-base_vector = Float64[0, 0, -equivalent_vel]
 direction = Float64[-1,0,0]
 speed_of_sound = SpeedOfSound(flight)
 
-# v.v runs from 0 to max mach^2
-# b.v runs from -sqrt(v.v) to sqrt(v.v) NOW NORMALIZED
-
-function compute_aero_forces(mach, aoa)
+function compute_aero_forces(mach, cos_aoa)
 	velocity = mach*speed_of_sound
-	velocity_vec = broadcast(*, Float64[-cos(aoa),sin(aoa),0], velocity)
-	return kRPC.Remote.SpaceCenter.Delayed.SimulateAerodynamicForceAt(guidance_flight, body, (0.0,0.0,0.0), ((velocity_vec + base_vector)...,)), velocity_vec
+	velocity_vec = broadcast(*, Float64[cos_aoa,sqrt(1-cos_aoa^2),0], velocity)
+	return kRPC.Remote.SpaceCenter.Delayed.SimulateAerodynamicForceAt(guidance_flight, body, (0.0,0.0,0.0), ((velocity_vec)...,)), velocity_vec
 end
 
 function sweep_aero()
@@ -56,14 +50,16 @@ function sweep_aero()
 	lft = Vector{Float64}[]
 	aoal = Float64[]
 	machl = Float64[]
-	for mach=0.0:0.1:1.0
-		for aoa=0:1:45
-			cll,bv = compute_aero_forces(mach, deg2rad(aoa))
+	for mach=0.0:0.025:1.5
+		for cos_aoa=cosd(180):1/90:cosd(0)
+			cll,bv = compute_aero_forces(mach, cos_aoa)
 			push!(cforce, cll)
 			normbv = bv/norm(bv)
 			push!(drg, normbv)
-			push!(lft, cross(cross([1.0,0.0,0.0], normbv),normbv))
-			push!(aoal, aoa)
+			liftd = cross(cross([1.0,0.0,0.0], normbv),normbv)
+			liftd = liftd/norm(liftd)
+			push!(lft, liftd)
+			push!(aoal, cos_aoa)
 			push!(machl, mach)
 		end
 	end
