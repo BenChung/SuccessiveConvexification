@@ -266,7 +266,7 @@ function solve_step(iteration::ProblemIteration)
 		end
 	end
 	vidxes = vcat(v_idx_it,qbi_idx_it)
-	ncons = Array{Float64,1}(K+1)
+	ncons = Array{Float64,1}(undef, K+1)
 	for i=1:K+1
 		#aoa
 		state = iterAbout[i].state[vidxes]
@@ -308,7 +308,7 @@ function solve_step(iteration::ProblemIteration)
 	ds = MathOptInterface.get(model, MathOptInterface.VariablePrimal(), dsig)
 	viol = MathOptInterface.get(model, MathOptInterface.VariablePrimal(), ctrl_viol)
 	aviol = MathOptInterface.get(model, MathOptInterface.VariablePrimal(), aoa_viol)
-	traj_points = Array{LinPoint,1}(K+1)
+	traj_points = Array{LinPoint,1}(undef, K+1)
 	for k=1:K+1
 		traj_points[k] = LinPoint(xs[:,k], us[:,k])
 	end
@@ -336,7 +336,17 @@ function solve_step(iteration::ProblemIteration)
 	end
 	println("costs ic:$(norm(viol,1)) daoa:$daoa rp:$(norm(aviol,1)) $(maximum(aoas)) $(iteration.rk)")
 	cost = prob.wNu*pv + prob.wTviol*ic + prob.wTviol*daoa
-	linpoints = Dynamics.linearize_dynamics(traj_points, sigHat + ds, 1.0/(K+1), ProbInfo(prob))
+
+	#linpoints = Dynamics.linearize_dynamics_rk4(traj_points, sigHat + ds, 1.0/(K+1), ProbInfo(prob))
+	#linpoints = Dynamics.linearize_dynamics(traj_points, sigHat + ds, 1.0/(K+1), ProbInfo(prob))
+
+	#=
+	dstate = sum(norm(linpoints[i].endpoint - linpoints_rk4[i].endpoint) for i=1:K-1)
+	djacob = sum(norm(linpoints[i].derivative .- linpoints_rk4[i].derivative) for i=1:K-1)
+	println((linpoints[1].derivative .- linpoints_rk4[1].derivative) ./ (linpoints[1].derivative))
+	println("dstate:$dstate djacob:$djacob")
+	=#
+
 	if iteration.rk == Inf
 		next_rk = prob.ri
 	else
@@ -364,7 +374,7 @@ function solve_step(iteration::ProblemIteration)
 			println("accept $rhk $cost pc:$dlk $rhk $case")
 		end
 	end
-	linpoints = Dynamics.linearize_dynamics(traj_points, sigHat + ds, 1.0/(K+1), ProbInfo(prob))
+	linpoints = Dynamics.linearize_dynamics_rk4(traj_points, sigHat + ds, 1.0/(K+1), ProbInfo(prob))
 	return ProblemIteration(prob, sigHat + ds, traj_points, linpoints, iteration.model, iteration.iter+1, next_rk, cost)
 end
 
