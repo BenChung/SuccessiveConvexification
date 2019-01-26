@@ -41,19 +41,22 @@ speed_of_sound = SpeedOfSound(flight)
 function compute_aero_forces(mach, cos_aoa)
 	velocity = mach*speed_of_sound
 	velocity_vec = broadcast(*, Float64[cos_aoa,sqrt(1-cos_aoa^2),0], velocity)
-	return kRPC.Remote.SpaceCenter.Delayed.SimulateAerodynamicForceAt(guidance_flight, body, (0.0,0.0,0.0), ((velocity_vec)...,)), velocity_vec
+	return kRPC.Remote.SpaceCenter.Delayed.SimulateAerodynamicForceAt(guidance_flight, body, (0.0,0.0,0.0), ((velocity_vec)...,)),
+		   kRPC.Remote.SpaceCenter.Delayed.SimulateAerodynamicTorqueAt(guidance_flight, body, (0.0,0.0,0.0), ((velocity_vec)...,)), velocity_vec
 end
 
 function sweep_aero()
 	cforce = kRPC.kPC[]
+	ctorque = kRPC.kPC[]
 	drg = Vector{Float64}[]
 	lft = Vector{Float64}[]
 	aoal = Float64[]
 	machl = Float64[]
 	for mach=0.0:0.025:1.5
 		for cos_aoa=cosd(180):1/90:cosd(0)
-			cll,bv = compute_aero_forces(mach, cos_aoa)
+			cll,ctr,bv = compute_aero_forces(mach, cos_aoa)
 			push!(cforce, cll)
+			push!(ctorque, cll)
 			normbv = bv/norm(bv)
 			push!(drg, normbv)
 			liftd = cross(cross([1.0,0.0,0.0], normbv),normbv)
@@ -64,6 +67,7 @@ function sweep_aero()
 		end
 	end
 	res = kRPC.SendMessage(conn, cforce)
+	tres = kRPC.SendMessage(conn, ctorque)
 	hcat(([aoal[i], machl[i], if !isnan(dot(res[i], drg[i])) dot(res[i], drg[i]) else 0.0 end, if !isnan(dot(res[i], lft[i])) dot(res[i], lft[i]) else 0.0 end] for i=1:length(res))...)
 end
 

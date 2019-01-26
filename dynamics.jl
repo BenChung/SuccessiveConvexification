@@ -48,17 +48,34 @@ module Dynamics
                         omegab[2] -omegab[3]  z          omegab[1];
                         omegab[3]  omegab[2] -omegab[1]  z         ]
     end
+#=
+dm=-info.a*norm(u)*mult 
+dx=vx
+dy=vy
+dz=vz
+dvx=acc[1]-info.g0
+dvy=acc[2]
+dvz=acc[3]
+dr1=rot_vel[1]
+dr2=rot_vel[2]
+dr3=rot_vel[3]
+dr4=rot_vel[4] 
+do1=rot_acc[1]
+do2=rot_acc[2]
+do3=rot_acc[3]]
+=#
+
     @inline function dx_static(state::StaticArrays.SArray{Tuple{14},T,1,14} where T, u::SArray{Tuple{3}, T, 1, 3} where T, mult, info::ProbInfo)
         qbi = state[qbi_idx]
         omb = state[omb_idx]
 
         aerf = Aerodynamics.aero_force(info.aero,DCM(qbi) * (SVector(1,0,0)),state[SVector(5,6,7)],info.sos)
 
-        thr_acc = DCM(qbi) * (u[thr_idx]/state[mass_idx] #= + aero_control =#)
-        aero_acc = aerf/state[mass_idx]
+        thr_acc = DCM(qbi) * (u[thr_idx]/state[mass_idx])
+        aero_acc = aerf./state[mass_idx]
         acc = thr_acc + aero_acc
         rot_vel = 0.5*Omega(omb)*qbi
-        rot_acc = info.jBi*(cross(info.rTB,u) #= + cross(info.rFB,aero_control) =# - cross(omb,info.jB*omb))
+        rot_acc = info.jBi*(cross(info.rTB,u) - cross(omb,info.jB*omb))
         return (@SVector [-info.a*norm(u), 
                      state[5],state[6],state[7], 
                      acc[1]-info.g0, acc[2], acc[3], 
@@ -141,12 +158,7 @@ module Dynamics
     end
     function rk4_seg_dyn(dt::Float64, info::ProbInfo)
         function inner(outp::Vector{T}, inp::Vector{T}) where T 
-            k1 = Array{T}(undef, 14)
-            k2 = Array{T}(undef, 14)
-            k3 = Array{T}(undef, 14)
-            k4 = Array{T}(undef, 14)
-            state = outp
-            state[:] = @view inp[1:14] 
+            state = SVector{14}(@view inp[1:14] )
             start_ctrl = SVector{3}(@view inp[15:17])
             ed_ctrl = SVector{3}(@view inp[18:20])
             i_sigma = inp[21]*dt
@@ -159,14 +171,15 @@ module Dynamics
                 ict = current_control(pca, start_ctrl, ed_ctrl)
                 mct = current_control(pca + pcs/2, start_ctrl, ed_ctrl)
                 ect = current_control(pca + pcs, start_ctrl, ed_ctrl)
-                dx_static(k1, SVector{14}(state), ict, idt, info)
-                dx_static(k2, SVector{14}(state + k1/2), mct, idt, info)
-                dx_static(k3, SVector{14}(state + k2/2), mct, idt, info)
-                dx_static(k4, SVector{14}(state + k3), ect, idt, info)
+                k1 = dx_static(state, ict, idt, info)
+                k2 = dx_static(state + k1./2, mct, idt, info)
+                k3 = dx_static(state + k2./2, mct, idt, info)
+                k4 = dx_static(state + k3, ect, idt, info)
                 ct += idt
                 pca += pcs
-                state[:] += 1/6*k1 + 2/6*k2 + 2/6*k3 + 1/6*k4
+                state += k1./6 + k2./3 + k3./3 + k4./6
             end
+            outp[:] = state
         end
         return inner
     end
