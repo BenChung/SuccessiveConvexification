@@ -4,6 +4,7 @@ using CSV
 using LinearAlgebra
 using StaticArrays
 using Interpolations
+using SymEngine
 using ..RocketlandDefns
 
 function load_aerodata(liftdrag::String)
@@ -14,8 +15,8 @@ function load_aerodata(liftdrag::String)
 	#mach, aoa
 	mach=0.0:0.025:1.5
 	aoa=cosd(180):1/90:cosd(0)
-	lift_itrp = scale(interpolate(reshape(lddf[:lift_p],length(aoa), length(mach)), BSpline(Cubic(Line())), OnGrid()), aoa, mach)
-	drag_itrp = scale(interpolate(reshape(lddf[:drag_p],length(aoa), length(mach)), BSpline(Cubic(Line())), OnGrid()), aoa, mach)
+	lift_itrp = scale(interpolate(reshape(lddf[:lift_p],length(aoa), length(mach)), BSpline(Cubic(Line(OnGrid())))), aoa, mach)
+	drag_itrp = scale(interpolate(reshape(lddf[:drag_p],length(aoa), length(mach)), BSpline(Cubic(Line(OnGrid())))), aoa, mach)
 	AtmosphericData(drag_itrp, lift_itrp, 1.0)
 end
 
@@ -27,7 +28,7 @@ function rescale_aerodata(data::ExoatmosphericData, Ul::Float64, Ut::Float64, Um
 	return data
 end
 
-function aero_force(data::AtmosphericData, bv::SArray{Tuple{3}, T, 1, 3}, vel::SArray{Tuple{3}, T, 1, 3}, spds::Float64)::Vector{T} where T
+function aero_force(data::AtmosphericData, bv::AbstractArray{T}, vel::AbstractArray{T}, spds::Float64)::Vector{T} where T<:Number
 	dp = dot(bv,vel)/norm(vel)
 	cos_aoa = clamp(dp/norm(bv), -1.0,1.0)
 	mach = norm(vel)/spds
@@ -46,8 +47,40 @@ function aero_force(data::AtmosphericData, bv::SArray{Tuple{3}, T, 1, 3}, vel::S
 	end
 end
 
-function aero_force(data::ExoatmosphericData, bv::SArray{Tuple{3}, T, 1, 3} where T, vel::SArray{Tuple{3}, T, 1, 3} where T, spds::Float64)
+function aero_force(data::AtmosphericData, bv::AbstractArray{T}, vel::AbstractArray{T}, spds::Float64)::Vector{T} where T<:Basic
+	dp = sum(bv .* vel)
+	cos_aoa = dp #/sqrt(sum(bv .^ 2))
+	mach = sqrt(sum(vel .^ 2))/spds
+
+	drag = SymFunction("drag")(cos_aoa,mach,symbols("pinfo"))*data.scalar
+	lift = SymFunction("lift")(cos_aoa,mach,symbols("pinfo"))*data.scalar
+	liftd = cross(cross(bv, vel),vel)
+	liftd_norm = sqrt(sum(liftd .^ 2))#sqrt(sum(vel .^ 2) * sum(bv .^ 2) * (sum(vel .^ 2) - cos_aoa^2))
+	liftd = (liftd)/liftd_norm
+	dragf = drag*vel/sqrt(sum(vel .^ 2))
+	liftf = lift*(SymFunction("ifnz").(liftd_norm, liftd))
+	return dragf + liftf
+end
+
+function aero_force(data::ExoatmosphericData, bv::AbstractArray{T} where T, vel::AbstractArray{T} where T, spds::Float64)
 	return [0.0,0.0,0.0]
 end
+
+function direct_drag(data::AtmosphericData, cos_aoa, mach)
+	return data.drag_itrp(cos_aoa, mach)
+end
+
+function direct_lift(data::AtmosphericData, cos_aoa, mach)
+	return data.lift_itrp(cos_aoa, mach)
+end
+
+function direct_drag(data::ExoatmosphericData, cos_aoa, mach)
+	return 0.0
+end
+
+function direct_lift(data::ExoatmosphericData, cos_aoa, mach)
+	return 0.0
+end
+
 
 end

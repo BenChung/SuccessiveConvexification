@@ -1,4 +1,5 @@
 module SampleProblems
+	using LinearAlgebra
 	using ..RocketlandDefns
 	using ..Aerodynamics
 	function normalize_problem(dp::DescentProblem)::DescentProblem
@@ -22,11 +23,11 @@ module SampleProblems
 	end
 
 	aero_info = Aerodynamics.load_aerodata("aero/lift_drag.csv")
-	base_prob = DescentProblem(g=9.82, mdry=66018, mwet=92960, Tmin=0.4*1000000, Tmax=1000000, jB=diagm([1.65e5,8.77e6,8.773e6]), 
+	base_prob = DescentProblem(g=9.82, mdry=66018, mwet=92960, Tmin=0.4*1000000, Tmax=1000000, jB=diagm(0=>[1.65e5,8.77e6,8.773e6]), 
 										  alpha=0.0003449, rTB=[-9.78571,0,0], rIi = [1000.0,1000.0,100.0], rIf=[0.0,0.0,0.0], vIi = [-100.0,-200.0,0], sos=352.0)
 	base_prob_scaled = normalize_problem(base_prob)
 
-	base_prob_aero = DescentProblem(g=9.82, mdry=66018, mwet=92960, Tmin=0.4*1000000, Tmax=1000000, jB=diagm([1.65e5,8.77e6,8.773e6]), 
+	base_prob_aero = DescentProblem(g=9.82, mdry=66018, mwet=92960, Tmin=0.4*1000000, Tmax=1000000, jB=diagm(0=>[1.65e5,8.77e6,8.773e6]), 
 										  alpha=0.0003449, rTB=[-9.78571,0,0], rIi = [1000.0,1000.0,100.0], rIf=[0.0,0.0,0.0], vIi = [-100.0,-200.0,0], sos=352.0, aero = aero_info)
 	base_prob_aero_scaled = normalize_problem(base_prob_aero)
 end

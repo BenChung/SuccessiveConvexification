@@ -123,6 +123,7 @@ module RocketlandDefns
 	export DescentProblem, ProbInfo, LinPoint, LinRes, ProblemIteration, ProblemModel, AerodynamicInfo, AtmosphericData, ExoatmosphericData
 end
 include("aerodynamics.jl")
+include("symbolic_diff.jl")
 include("dynamics.jl")
 include("initial_solve.jl")
 include("rocketland.jl")

@@ -104,9 +104,9 @@ function solve_initial(prob::DescentProblem)
     return initial_points,Dynamics.linearize_dynamics(initial_points, prob.tf_guess, 1.0/(N+1), ProbInfo(prob))
 end
 
-function linear_initial(problem::DescentProblem)
+function linear_points(problem::DescentProblem)
     K = problem.K
-    initial_points = Array{LinPoint,1}(K+1)
+    initial_points = Array{LinPoint,1}(UndefInitializer(), K+1)
     for k=0:K
         mk = (K-k)/(K) * problem.mwet + (k/(K))*problem.mdry
         rIk = (K-k)/(K) * problem.rIi + (k/(K))*problem.rIf
@@ -119,7 +119,12 @@ function linear_initial(problem::DescentProblem)
         control_init = @SVector [mk*problem.g,0,0]
         initial_points[k+1] = LinPoint(state_init, control_init)
     end
-    return initial_points,Dynamics.linearize_dynamics(initial_points, problem.tf_guess, 1.0/(K+1), ProbInfo(problem))
+    return initial_points
+end
+
+function linear_initial(problem::DescentProblem, cache::Dynamics.LinearCache)
+    initial_points = linear_points(problem)
+    return initial_points,Dynamics.linearize_dynamics_symb(initial_points, problem.tf_guess, cache)
 end
 
 end
