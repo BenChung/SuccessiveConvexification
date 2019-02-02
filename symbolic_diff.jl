@@ -110,7 +110,6 @@ function make_simplified(name, fun, nargs)
 	map(x -> push!(need_args, x), vcat(map(x -> map(Symbol, SymEngine.free_symbols(x)), retv)...))
 	map(x -> delete!(need_args, Symbol(x)), args)
 	ordered_args = sort(collect(need_args))
-	println(ordered_args)
 
 	# generate the header
 	header = map(x -> :($(Symbol(x[2])) = inp[$(x[1])]), enumerate(args))
