@@ -108,8 +108,17 @@ module RocketlandDefns
 		trust_region::MOI.ConstraintIndex
 	end
 
+    struct LinearCache
+        cfg
+        cache :: Any # don't know until inner module is generated
+        probinfo :: ProbInfo
+        base_dt :: Float64
+        lin_mod
+    end
+
 	struct ProblemIteration
 		problem::DescentProblem
+		cache::LinearCache
 		sigma::Float64
 
 		about::Array{LinPoint,1}
@@ -120,7 +129,7 @@ module RocketlandDefns
 		rk::Float64
 		cost::Float64
 	end
-	export DescentProblem, ProbInfo, LinPoint, LinRes, ProblemIteration, ProblemModel, AerodynamicInfo, AtmosphericData, ExoatmosphericData
+	export DescentProblem, ProbInfo, LinPoint, LinRes, ProblemIteration, ProblemModel, AerodynamicInfo, AtmosphericData, ExoatmosphericData, LinearCache
 end
 include("aerodynamics.jl")
 include("symbolic_diff.jl")

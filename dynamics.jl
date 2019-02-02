@@ -286,14 +286,6 @@ module Dynamics
         return results
     end
 
-    struct LinearCache
-        cfg :: ForwardDiff.JacobianConfig
-        cache :: Any # don't know until inner module is generated
-        probinfo :: ProbInfo
-        base_dt :: Float64
-        lin_mod
-    end
-
     function initalize_linearizer(prob::ProbInfo, base_dt::Float64)
         lin_mod = Dynamics.make_dynamics_module(prob, base_dt)
         cache = Base.invokelatest(lin_mod.IntegratorCache, nothing)
