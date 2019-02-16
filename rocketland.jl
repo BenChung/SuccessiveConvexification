@@ -22,20 +22,23 @@ const acc_width = state_dim+control_dim*2+3
 const acc_height = state_dim
 const mass_idx = 1
 
-function create_initial(problem::DescentProblem)
+function create_initial(problem::DescentProblem, linear_cache::LinearCache)
     K = problem.K
-    linear_cache = Dynamics.initalize_linearizer(ProbInfo(problem), 1.0/(problem.K+1))
     initial_points,linpoints = FirstRound.linear_initial(problem, linear_cache)
     model = build_model(problem, K, linpoints, initial_points, problem.tf_guess)
     return ProblemIteration(problem, linear_cache, problem.tf_guess, initial_points, linpoints, model, 0, Inf, Inf)
 end
 
 const MOI=MathOptInterface
+const SAF=MOI.ScalarAffineFunction
+const VAF=MOI.VectorAffineFunction
 const SA=MOI.ScalarAffineTerm
 const VA=MOI.VectorAffineTerm
+const VoV=MOI.VectorOfVariables
+const SOC=MOI.SecondOrderCone
 
 function build_model(prob, K, iterDynam, iterAbout, sigHat)
-	model = MosekOptimizer(MSK_IPAR_LOG=1,MSK_IPAR_INFEAS_REPORT_AUTO=1,MSK_IPAR_BI_IGNORE_MAX_ITER=1,
+	model = MosekOptimizer(MSK_IPAR_LOG=0,MSK_IPAR_INFEAS_REPORT_AUTO=1,MSK_IPAR_BI_IGNORE_MAX_ITER=1,
 				MSK_IPAR_INTPNT_MAX_ITERATIONS=10000)
 	dcs = MOI.ConstraintIndex[]
 	state_nuc = MOI.ConstraintIndex[]
@@ -50,173 +53,137 @@ function build_model(prob, K, iterDynam, iterAbout, sigHat)
 	uv = reshape(MOI.add_variables(model, control_dim*(K+1)), control_dim, K+1)
 	dxv = reshape(MOI.add_variables(model, state_dim*(K+1)), state_dim, K+1)
 	duv = reshape(MOI.add_variables(model, control_dim*(K+1)), control_dim, K+1)
-	nuv = reshape(MOI.add_variables(model, state_dim*(K+1)), state_dim, K+1)
 	dsig = MOI.add_variable(model)
+	nuv = reshape(MOI.add_variables(model, state_dim*(K+1)), state_dim, K+1)
 
-	# state helpers
-	xvh = reshape(MOI.add_variables(model, 7*(K+1)), 7, K+1)
-	uvh = reshape(MOI.add_variables(model, 3*(K+1)), 3, K+1)
-
-	#relaxations
-	deltaI = MOI.add_variable(model)
-	deltasv = MOI.add_variable(model)
-	nuSum = MOI.add_variable(model)
-	tlb_viol = MOI.add_variables(model, K+1)
-	tlb_sviol = MOI.add_variable(model)
-	aoa_viol = MOI.add_variables(model, K+1)
-	aoa_sviol = MOI.add_variable(model)
-	thr_tot = MOI.add_variable(model)
-
-	txv = MOI.add_variables(model, K+1)
-	sxv = MOI.add_variables(model, K+1)
-	tsv = MOI.add_variable(model)
-	ssv = MOI.add_variable(model)
-
-	#helpers
-	gs_h = MOI.add_variables(model, K+1)
-	sqcm_h = MOI.add_variables(model, K+1)
-	ommax_h = MOI.add_variables(model, K+1)
-	uf_h = MOI.add_variables(model, K+1)
-	ctrl_h = MOI.add_variables(model, K+1)
-	rkv = MOI.add_variable(model)
-	rkv2 = MOI.add_variable(model)
-	duvh = reshape(MOI.add_variables(model, control_dim*(K+1)), control_dim, K+1)
-	dxvh = reshape(MOI.add_variables(model, state_dim*(K+1)), state_dim, K+1)
+	# trust regions
+	Jvnu = MOI.add_variable(model)
+	Jtr = MOI.add_variable(model)
+	Jsig = MOI.add_variable(model)
 
 	#objective
-	# x[1,K+1] + prob.wNu*optVar2 + prob.wID*optVar1 + prob.wDS*sum(optDeltaS)
 	MOI.set(model, MOI.ObjectiveFunction{MOI.ScalarAffineFunction{Float64}}(), 
-				    MOI.ScalarAffineFunction([SA(prob.wCst, dsig), SA(prob.wNu, nuSum), #= SA(prob.wID, deltaI), SA(prob.wDS, deltasv), =# SA(prob.wTviol, tlb_sviol), SA(prob.wTviol, aoa_sviol)],0.0))
+		SAF([SA(-1.0, xv[1, K+1]), SA(1.0e4, Jvnu), SA(0.5, Jtr), SA(1.0, Jsig)],0.0))
 	MOI.set(model, MOI.ObjectiveSense(), MOI.MIN_SENSE)
 
-	sumv = MOI.add_variable(model)
-	MOI.add_constraint(model, MOI.SingleVariable(sumv), MOI.EqualTo(0.5))
-	MOI.add_constraint(model, MOI.VectorOfVariables([nuSum; sumv; reshape(nuv, length(nuv))]), MOI.RotatedSecondOrderCone(2+length(nuv)))
-	#MOI.add_constraint(model, MOI.VectorOfVariables([nuSum; reshape(nuv, length(nuv))]), MOI.SecondOrderCone(1+length(nuv)))
-	#=
-	MOI.add_constraint(model, MOI.VectorAffineFunction(
-		vcat([VA(i, SA(1.0, deltaIs[i])) for i=1:K+1], 
-			 [VA(i, SA(-1.0, txv[i])) for i=1:K+1]),fill(0.0, K+1)), MOI.Zeros(K+1))
-			 =#
-			 println("vvar1 : $(deltaI)")
-	MOI.add_constraint(model, MOI.VectorOfVariables([deltaI; dxv[:,:]...; duv[:,:]...]), 
-								MOI.SecondOrderCone(1+(state_dim + control_dim)*(K+1)))
-	#MOI.add_constraint(model, MOI.VectorOfVariables([deltasv, dsig]), MOI.SecondOrderCone(2))
-	#MOI.add_constraint(model, MOI.VectorOfVariables([thr_tot; uv[:,:]...]), MOI.SecondOrderCone(1+(control_dim)*(K+1)))
-	sumv3 = MOI.add_variable(model)
-	MOI.add_constraint(model, MOI.SingleVariable(sumv3), MOI.EqualTo(0.5))
+	# couple the xs and us to the dxs and the dus
+	# about + dx = x; about + du = u; etc
+    # vcat(iterAbout[:].state...) + reshape(xv, state_dim*(K+1)) - reshape(xv, state_dim*(K+1)) = 0
+    # vcat(iterAbout[:].control...) + reshape(duv, control_dim*(K+1)) - reshape(uv, control_dim*(K+1)) = 0
+    state_base = MOI.add_constraint(model, VAF(VA.([1:state_dim*(K+1); 1:state_dim*(K+1)], 
+    	[SA.(1.0, reshape(dxv, state_dim*(K+1))); SA.(-1.0, reshape(xv, state_dim*(K+1)))]), 
+    	Array(vcat(getfield.(iterAbout[:], :state)...))), MOI.Zeros(state_dim*(K+1)))
+    control_base = MOI.add_constraint(model, VAF(VA.([1:control_dim*(K+1); 1:control_dim*(K+1)], 
+    	[SA.(1.0, reshape(duv, control_dim*(K+1))); SA.(-1.0, reshape(uv, control_dim*(K+1)))]), 
+    	Array(vcat(getfield.(iterAbout[:], :control)...))), MOI.Zeros(control_dim*(K+1)))
 
-	MOI.add_constraint(model, MOI.VectorOfVariables([tlb_sviol; sumv3; tlb_viol]), MOI.RotatedSecondOrderCone(2+(K+1)))
-	sumv4 = MOI.add_variable(model)
-	MOI.add_constraint(model, MOI.SingleVariable(sumv4), MOI.EqualTo(0.5))
-	MOI.add_constraint(model, MOI.VectorOfVariables([aoa_sviol; sumv4; aoa_viol]), MOI.RotatedSecondOrderCone(2+(K+1)))
+    # build the trust regions
+    MOI.add_constraint(model, VoV([Jvnu; reshape(nuv, state_dim*(K+1))]), SOC(state_dim*(K+1) + 1))
+    MOI.add_constraint(model, VoV([Jtr; reshape(dxv, state_dim*(K+1));
+    	reshape(duv, control_dim*(K+1))]), SOC(1+state_dim*(K+1)+control_dim*(K+1)))
+    MOI.add_constraint(model, VoV([Jsig, dsig]), SOC(2))
 
-	#initial state constraints
-	eq_veccons(vect, val) = map((vr,vl)->MOI.add_constraint(model, MOI.SingleVariable(vr), MOI.EqualTo(vl)), vect, val)
+	#initial and final state constraints
+	# r_1 = r_i, v_1 = v_i, omb_1 = omb_i; same for final
+	# we assume that the base solution satisfies the required state constraints. Therefore, it is sufficient
+	# to lock the differences to 0
+	# done as one big vector equality constraint; 1 * vars - vals = 0 -> vars = vals
+	vars = map(t -> VA(t...), enumerate(
+		SA.(1.0, [xv[mass_idx, 1]; xv[r_idx_it,1]; xv[v_idx_it,1]; xv[omb_idx_it,1];
+				  xv[r_idx_it,K+1]; xv[v_idx_it,K+1]; xv[qbi_idx_it,K+1]; xv[omb_idx_it,K+1];
+				  uv[2:3, K+1]])))
+	vals = -[prob.mwet; prob.rIi; prob.vIi; prob.wBi;
+			            prob.rIf; prob.vIf; prob.qBIf; prob.wBf; 0.0; 0.0]
+	MOI.add_constraint(model, VAF(vars, vals), MOI.Zeros(length(vars)))
 
-	scr = MOI.add_constraint(model, MOI.VectorAffineFunction(
-		vcat([[VA(i+(j-1)*state_dim, SA(1.0, xv[i,j])) for i=1:state_dim, j=1:K+1]...], 
-			 [[VA(i+(j-1)*state_dim, SA(-1.0, dxv[i,j])) for i=1:state_dim, j=1:K+1]...]), 
-		reshape([-iterAbout[j].state[i] for j=1:K+1, i=1:state_dim],state_dim*(K+1))), MOI.Zeros(state_dim*(K+1)))
-
-	ccr = MOI.add_constraint(model, MOI.VectorAffineFunction(
-		vcat([[VA(i+(j-1)*control_dim, SA(1.0, uv[i,j])) for i=1:control_dim, j=1:K+1]...], 
-			 [[VA(i+(j-1)*control_dim, SA(-1.0, duv[i,j])) for i=1:control_dim, j=1:K+1]...]), 
-		reshape([-iterAbout[j].control[i] for i=1:control_dim, j=1:K+1],control_dim*(K+1))), MOI.Zeros(control_dim*(K+1)))
-
-	MOI.add_constraint(model, MOI.SingleVariable(xv[mass_idx,1]), MOI.EqualTo(prob.mwet))
-	eq_veccons(xv[r_idx_it,1], prob.rIi)
-	eq_veccons(xv[v_idx_it,1], prob.vIi)
-	#eq_veccons(xv[qbi_idx_it,1],prob.qBIi)
-	eq_veccons(xv[omb_idx_it,1], prob.wBi)
-
-	#final state constraints
-	eq_veccons(xv[r_idx_it,K+1],prob.rIf)
-	eq_veccons(xv[v_idx_it,K+1],prob.vIf)
-	eq_veccons(xv[qbi_idx_it,K+1],prob.qBIf)
-	eq_veccons(xv[omb_idx_it,K+1],prob.wBf)
-	eq_veccons(uv[2:3,K+1], [0.0,0.0])
-
-	#dynamics
-	for i=1:K
-		dk = iterDynam[i]
-		ab = iterAbout[i]
-		abn = iterAbout[i+1]
-		drv = dk.derivative
-		ep = dk.endpoint - abn.state
-		del = [dxv[:,i]; duv[:,i]; duv[:,i+1]; dsig]
-		vars = vcat([[map((coeff, vari) -> VA(r, SA(coeff, vari)), drv[r,:], del); VA(r, SA(1.0,nuv[r,i])); VA(r, SA(-1.0,dxv[r,i+1]))] for r in 1:state_dim]...)
-		push!(dcs, MOI.add_constraint(model, MOI.VectorAffineFunction(vars, collect(ep)), MOI.Zeros(state_dim)))
+	# linearized dynamics
+	# where inp_n = [state_n; control_n; control_n+1; sigma]
+	# at each step, ostate_{n+1} + dstate_{n+1} = linearized*(lininp_n + dinp_n) + nu
+	# at each step, ostate_{n+1} + dstate_{n+1} = endpoint + linearized*dinp_n + nu
+	# at each step, dstate_{n+1} = linearized*dinp_n + nu + (endpoint - ostate_{n+1})
+	# so linearized*[dstate_n; dcontrol_n; dcontrol_n+1; dsigma] + nu + (endpoint - ostate_{n+1}) - dstate_{n+1} = 0
+	dcstrs = MOI.ConstraintIndex[]
+	for n=1:K
+		matmul = vcat(map((col,var) -> vcat(map(x->VA(x...), enumerate(map(x -> SA(x,var), col)))...), 
+					      eachcol(iterDynam[n].derivative), [dxv[:,n]; duv[:,n]; duv[:,n+1]; dsig])...)
+		nu_eqn = map(invar -> VA(invar[1], SA(1.0, invar[2])), enumerate(nuv[:,n+1]))
+		eq_eqn = map(invar -> VA(invar[1], SA(-1.0, invar[2])), enumerate(dxv[:,n+1]))
+		lin_err = Array(iterDynam[n].endpoint - iterAbout[n+1].state)
+		push!(dcstrs, MOI.add_constraint(model, VAF(vcat(matmul, nu_eqn, eq_eqn), lin_err), MOI.Zeros(state_dim)))
 	end
 
-	MOI.add_constraint(model, MOI.VectorAffineFunction(vcat([VA(t, SA(1/tggs, xv[2,t])) for t=1:K+1], [VA(t, SA(-1.0, gs_h[t])) for t=1:K+1]), zeros(K+1)), MOI.Zeros(K+1))
-	MOI.add_constraint(model, MOI.VectorAffineFunction([VA(t, SA(1.0, sqcm_h[t])) for t=1:K+1], fill(-sqcm, K+1)), MOI.Zeros(K+1))
-	MOI.add_constraint(model, MOI.VectorAffineFunction([VA(t, SA(1.0, ommax_h[t])) for t=1:K+1], fill(-deg2rad(prob.omMax), K+1)), MOI.Zeros(K+1))
+	# state constraints wooo; equation nums from Szmuk and Acikmese 2018
+	# eq. 6; mdry <= mk
+	MOI.add_constraint(model, VAF(VA.(1:K, SA.(1.0, xv[1,2:K+1])), fill(-prob.mdry, K)), MOI.Nonnegatives(K))
 
-	MOI.add_constraint(model, MOI.VectorAffineFunction([[VA(t, SA(1/delMax,uv[1,t])) for t=1:K+1]; [VA(t, SA(-1.0,uf_h[t])) for t=1:K+1]], zeros(K+1)), MOI.Nonnegatives(K+1)) # u[1,i]/delMax >= uf_h[i]
-	MOI.add_constraint(model, MOI.VectorAffineFunction([VA(t, SA(1.0, uf_h[t])) for t=1:K+1], fill(-prob.Tmax, K+1)), MOI.Nonpositives(K+1)) # uf_h[i] <= prob.Tmax
+	# eq. 7; tan (gamma_gs) ||rIk[2:3]||_2 <= rIk[1]
+	# we model as ||rIk[2:3]||_2 <= (gshelp: rIk[1]/tan(gamma_gs))
+	# initalize gshelp_k - 1/tan(gamma_ga) * rIk[1] = 0
+	gshelp = MOI.add_variables(model, K)
+	MOI.add_constraint(model, 
+		VAF([VA.(1:K, SA.(1.0, gshelp)); VA.(1:K, SA.(-1.0/tggs, xv[r_idx_it[1], 1:K]))], zeros(K)), MOI.Zeros(K))
+	# SECOND ORDER CONE WOOOO; ||rIk[2:3]||_2 <= gshelp_k
+	for n=1:K
+		MOI.add_constraint(model, VoV([gshelp[n]; xv[r_idx_it[2:3], n]]), SOC(3))
+	end
 
-	normed = map(lin->lin.control/norm(lin.control), iterAbout)
-	consts = convert(Array{Float64,1},vcat(normed...))
+	# eq. 28; cos thmax <= 1 - 2 ||qBIk[3:4]||^2_2
+	# or ||qBIk[3:4]||^2_2  <= (1 - cos thmax)/2
+	# or ||qBIk[3:4]||_2  <= (aoa_help: sqrt((1 - cos thmax)/2))
+	# WE DON'T NEED NO STINKIN' ROTATED CONES
+	# initialize aoa_help; need one for each cone :(
+	aoa_help = MOI.add_variables(model, K)
+	MOI.add_constraint(model, VAF(VA.(1:K, SA.(1.0, aoa_help)), fill(-sqcm, K)), MOI.Zeros(K))
+	# ||qBIk[3:4]||_2 <= aoa_help
+	for n=1:K
+		MOI.add_constraint(model, VoV([aoa_help[n]; xv[qbi_idx_it[3:4], n]]), SOC(3))
+	end
+
+	# eq. 10; ||ombk||_2 <= (ang_sp_help: ommax)
+	ang_sp_help = MOI.add_variables(model, K)
+	MOI.add_constraint(model, VAF(VA.(1:K, SA.(1.0, ang_sp_help)), fill(-prob.omMax, K)), MOI.Zeros(K))
+	for n=1:K
+		MOI.add_constraint(model, VoV([ang_sp_help[n]; xv[omb_idx_it, n]]), SOC(4))
+	end
+
+	# constraints now from Szmuk, Reynolds, and Acikmese 2018 https://arxiv.org/pdf/1811.10803.pdf
+	# max thrust constraint ||uk|| <= tMax (8)
+	# max_thrust_vk = max_thrust
+	#max_thrust = MOI.add_variables(model, 	K+1)
+	#MOI.add_constraint(model, VAF(VA.(1:K+1, SA.(1.0, max_thrust)), fill(-prob.Tmax, K+1)), MOI.Zeros(K+1))
+	# thrust angle constraint (9)
+	# ||uk|| <= uk[3]/(cos delMax)
+	# thrust_anglek - uk[3]/(cos delMax) = 0
+	#thrust_angle = MOI.add_variables(model, K+1)
+	#MOI.add_constraint(model, VAF([VA.(1:K+1, SA.(1.0, thrust_angle)); VA.(1:K+1, SA.(-1/delMax, uv[3,:]))], zeros(K+1)), MOI.Zeros(K+1))
+
+	# combined thrust constraint 
+	# ||uk|| <= min(max_thrust_vk, thrust_anglek)
+	# mtk <= max_thrust_vk /\ mtk <= thrust_anglek
+	# ||uk|| <= mtk
+	mtk = MOI.add_variables(model, K+1)
+	# mtk <= max_thrust_vk <=> mtk - max_thrust_vk <= 0 <=> mtk - prob.Tmax <= 0
+	MOI.add_constraint(model, VAF(VA.(1:K+1, SA.(1.0,mtk)), fill(-prob.Tmax, K+1)), MOI.Nonpositives(K+1))
+	# mtk <= thrust_anglek <=> mtk - thrust_anglek <= 0 <=> mtk - uk[3]/(cos delMax) <= 0
+	MOI.add_constraint(model, VAF([VA.(1:K+1, SA.(1.0,mtk)); VA.(1:K+1, SA.(-1/delMax, uv[1,:]))], zeros(K+1)), MOI.Nonpositives(K+1))
+
+	for n=1:K+1
+		MOI.add_constraint(model, VoV([mtk[n]; uv[:, n]]), SOC(4))
+	end
+
+	#linearized thrust lower bound constraint (8 & 35)
+	# Tmin - ||uk|| <= 0
+	# h_tlb,k + H_tlb,k duk <= 0
+	# h_tlb,k = Tmin - ||uk_lin||
+	# H_tlb,k = d(Tmin-||uk_lin||)/duk_lin = -d(uk_lin)/duk_lin = -uk_lin.../norm(uk_lin)
+	tlbvars = vcat((VA.(fill(n,3), SA.(-(iterAbout[n].control ./ norm(iterAbout[n].control)), duv[:,n])) for n=1:K+1)...)
+	tlbconsts = [(prob.Tmin - norm(iterAbout[n].control)) for n=1:K+1]
+	thrust_lb_constraint = MOI.add_constraint(model, VAF(tlbvars, tlbconsts), MOI.Nonpositives(K+1))
+
+	# state triggered constraints
 	
-	tcs = MOI.add_constraint(model, MOI.VectorAffineFunction([reshape([VA(t, SA(0.0, uv[i,t])) for i=1:control_dim, t=1:K+1], control_dim*(K+1));
-															  [VA(t, SA(1.0, tlb_viol[t])) for t=1:K+1]], fill(-prob.Tmin, K+1)), MOI.Nonnegatives(K+1)) # prob.Tmin <= dot(Blin/Bnorm, u[1:3,i]) + viol
 
-	#non-convex
-	# ||v||^2_2 - dot(Dynamics.DCM(xv[qbi_idx_it,i]) * [-1,0,0], xv[v_idx_it,i])^2 <= 2*maxDp/rho
-	# q0 = quat[1]
-	# q1 = quat[2]
-	# q2 = quat[3]
-	# q3 = quat[4]
-	# qv1 = -(1-2*(q2^2 + q3^2))
-	# qv2 = -(2*(q1 * q2 + q0 * q3))
-	# qv3 = -(2*(q1 * q3 - q0 * q2))
-	# ||xv[v_idx_it,i]||^2_2 <= sqV
-	# sqV - [dot(q,v)^2|_q <= (2*maxDp/rho)^2
-	# sqV - [dot(q,v)^2|_q <= (2*maxDp/rho)^2
-	# sqV - [dot(q,v)^2|_q - (2*maxDp/rho)^2 <= 0
-	# sqV - (base_{v,q} + grad*{dv,dq}) - (2*maxDp/rho)^2 <= 0
-	# sqV - grad*{dv,dq} - (2*maxDp/rho)^2 - base_{v,q} <= 0
-	sqVs = MOI.add_variables(model, K+1)
-	oneHalves = MOI.add_variables(model, K+1)
-	for i=1:K+1
-		MOI.add_constraint(model, MOI.SingleVariable(oneHalves[i]), MOI.EqualTo(0.5))
-		MOI.add_constraint(model, MOI.VectorOfVariables([sqVs[i]; oneHalves[i]; xv[v_idx_it,i]]), MOI.RotatedSecondOrderCone(5))
-	end
-	pcs = MOI.add_constraint(model, MOI.VectorAffineFunction([
-		vcat(([VA(t, SA(0.0, v)) for v in xv[v_idx_it,t]] for t=1:K+1)...,
-			 ([VA(t, SA(0.0, v)) for v in xv[qbi_idx_it,t]] for t=1:K+1)...); [VA(t, SA(1.0, sqVs[t])) for t=1:K+1]; [VA(t, SA(1.0, aoa_viol[t])) for t=1:K+1]], 
-		fill(-(2*prob.dpMax/prob.rho)^2, K+1)), MOI.Nonpositives(K+1))
-
-	for i=1:K+1
-		MOI.add_constraint(model, MOI.SingleVariable(tlb_viol[i]), MOI.GreaterThan(0.0))
-	end
-	inds = [collect(3:4); collect(10:11); collect(12:14)]
-	for i=1:K+1
-		#state constraints
-		if i > 1 # avoid bounding the initial state
-			MOI.add_constraint(model, MOI.SingleVariable(xv[mass_idx,i]), MOI.GreaterThan(prob.mdry))
-		end
-		MOI.add_constraint(model, MOI.VectorAffineFunction([map((i,v) -> VA(i, SA(1.0,v)), 1:10, [xv[inds,i]; uv[:,i]]); map((i,v) -> VA(i, SA(-1.0,v)), 1:10, [xvh[:,i]; uvh[:,i]])], fill(0.0,10)), MOI.Zeros(10))
-		MOI.add_constraint(model, MOI.VectorOfVariables([gs_h[i]; xvh[1:2,i]]), MOI.SecondOrderCone(3)) # xv[2,i]/tggs >= norm(xv[3:4,i], gs_h[i]=xv[2,i]/tggs
-		MOI.add_constraint(model, MOI.VectorOfVariables([sqcm_h[i]; xvh[3:4,i]]), MOI.SecondOrderCone(3)) # sqcm >= norm(xv[10:11,i])
-		MOI.add_constraint(model, MOI.VectorOfVariables([ommax_h[i]; xvh[5:7,i]]), MOI.SecondOrderCone(4)) # deg2rad(prob.omMax) >= norm(xv[12:14,i])
-
-		#control constraint
-		MOI.add_constraint(model, MOI.VectorOfVariables([uf_h[i]; uvh[1:3,i]]), MOI.SecondOrderCone(4)) # uf_h[i] >= norm(u[1:3,i])
-	end	
-	rkc = MOI.add_constraint(model, MOI.SingleVariable(rkv), MOI.LessThan(10.0))
-	MOI.add_constraint(model, MOI.VectorAffineFunction([
-		[VA(i+(j-1)*control_dim, SA(1.0,duv[i,j])) for i=1:control_dim, j=1:K+1]...;
-		[VA(i+(j-1)*control_dim, SA(-1.0, duvh[i,j])) for i=1:control_dim, j=1:K+1]...], fill(0.0,(K+1)*control_dim)), MOI.Zeros((K+1)*control_dim))
-	MOI.add_constraint(model, MOI.VectorAffineFunction([
-		[VA(i+(j-1)*state_dim, SA(1.0,dxv[i,j])) for i=1:state_dim, j=1:K+1]...;
-		[VA(i+(j-1)*state_dim, SA(-1.0, dxvh[i,j])) for i=1:state_dim, j=1:K+1]...], fill(0.0,(K+1)*state_dim)), MOI.Zeros((K+1)*state_dim))
-	sumv2 = MOI.add_variable(model)
-	MOI.add_constraint(model, MOI.SingleVariable(sumv2), MOI.EqualTo(0.5))
-	MOI.add_constraint(model, MOI.VectorOfVariables([rkv; sumv2; duvh[:,:]...; dxvh[:,:]...; dsig]), MOI.RotatedSecondOrderCone(3+length(uv)+length(xv)))
-
-	return ProblemModel(model, xv, uv, dxv, duv, dsig, nuv, tlb_viol, aoa_viol, rkv, scr, ccr, dcs, tcs, pcs, rkc)
+	return ProblemModel(model, xv, uv, dxv, duv, dsig, nuv, state_base, control_base, dcstrs, thrust_lb_constraint)
 end
 
 const MOI=MathOptInterface
@@ -224,68 +191,62 @@ function vsq_sub_dotsq(inp::Vector{T}) where T
 	return dot(inp[1:3], Dynamics.DCM(inp[4:7])*[1.0,0,0])^2
 end
 
-function solve_step(iteration::ProblemIteration)
+function solve_step(iteration::ProblemIteration, linear_cache::LinearCache)
 	prob = iteration.problem
+	itermodel = iteration.model
+	model = itermodel.socp_model
 	K = prob.K
-	xv = iteration.model.xv
-	uv = iteration.model.uv
-	dxv = iteration.model.dxv
-	duv = iteration.model.duv
-	dsig = iteration.model.dsv
-	nuv = iteration.model.nuv
-	rkv = iteration.model.rkv
-	ctrl_viol = iteration.model.tnv
-	aoa_viol = iteration.model.anv
-	state_base = iteration.model.state_base
-	control_base = iteration.model.control_base
-	dynamic_constraints = iteration.model.dynamic_constraints
-	pointing_constraint = iteration.model.pointing_constraints
-	aoa_constraint = iteration.model.aoa_constraint
-	trust_region = iteration.model.trust_region
+	xv = itermodel.xv
+	uv = itermodel.uv
+	dxv = itermodel.dxv
+	duv = itermodel.duv
+	dsig = itermodel.dsv
+	nuv = itermodel.nuv
+	# fix the base constraints
 
-	iterDynam = iteration.dynam
-	iterAbout = iteration.about
-	sigHat = iteration.sigma
-	model = iteration.model.socp_model
-	MOI.modify(model, state_base, MOI.VectorConstantChange(reshape([-iterAbout[j].state[i] for i=1:state_dim, j=1:K+1],state_dim*(K+1))))
-	MOI.modify(model, control_base, MOI.VectorConstantChange(reshape([-iterAbout[j].control[i] for i=1:control_dim, j=1:K+1],control_dim*(K+1))))
-	for i=1:K
-		cstr = dynamic_constraints[i]
-		derv = iterDynam[i].derivative
-		ep = iterDynam[i].endpoint - iterAbout[i+1].state
-		del = [dxv[:,i]; duv[:,i]; duv[:,i+1]; dsig]
-		for j=1:length(del)
-			vari = del[j]
-			MOI.modify(model, cstr, MOI.MultirowChange(vari, [(r,derv[r,j]) for r = 1:state_dim]))
-		end
-		MOI.modify(model, cstr, MOI.VectorConstantChange(collect(ep)))
-	end
-	for i=1:K+1
-		#pointing 
-		normed = iterAbout[i].control/norm(iterAbout[i].control)
-		for j=1:control_dim
-			MOI.modify(model, pointing_constraint, MOI.MultirowChange(uv[j,i], [(i, normed[j])]))
-		end
-	end
-	vidxes = vcat(v_idx_it,qbi_idx_it)
-	ncons = Array{Float64,1}(undef, K+1)
-	for i=1:K+1
-		#aoa
-		state = iterAbout[i].state[vidxes]
-		vars = xv[vidxes,i]
-		base = vsq_sub_dotsq(state)
-		grad = -ForwardDiff.gradient(vsq_sub_dotsq, state)
-		ncons[i] =  -(2*prob.dpMax/prob.rho)^2 - base
-		for p in zip(vars,grad)
-			MOI.modify(model, aoa_constraint, MOI.MultirowChange(p[1],[(i, p[2])]))
-		end
-	end
-	MOI.modify(model, aoa_constraint, MOI.VectorConstantChange(ncons))
+	about = iteration.about
+	dynam = iteration.dynam
+	MOI.modify(model, itermodel.state_base, 
+		MOI.VectorConstantChange(Array(vcat(getfield.(about[:], :state)...))))
+	MOI.modify(model, itermodel.control_base, 
+		MOI.VectorConstantChange(Array(vcat(getfield.(about[:], :control)...))))
 
-	println(iteration.rk)
-	if iteration.rk != Inf
-		MOI.set(model, MOI.ConstraintSet(), trust_region, MOI.LessThan(iteration.rk))
+	# fix the dynamic constraints
+	for n=1:K
+		vars = [dxv[:,n]; duv[:,n]; duv[:,n+1]; dsig]
+		derivs = map(x -> collect(enumerate(x)), eachcol(dynam[n].derivative))
+		changes = MOI.MultirowChange.(vars, derivs)
+		map(x->MOI.modify(model, itermodel.dynamic_constraints[n], x), changes)
+		lin_err = Array(dynam[n].endpoint - about[n+1].state)
+		MOI.modify(model, itermodel.dynamic_constraints[n], MOI.VectorConstantChange(lin_err))
 	end
+
+	# fix the thrust lower bound
+	mrcs = vcat((MOI.MultirowChange.(duv[:, n], 
+				 map(x->[(n, x)], -about[n].control ./ norm(about[n].control))) for n=1:K+1)...)
+	ncsts = [(prob.Tmin - norm(about[n].control)) for n=1:K+1]
+	map(cstr -> MOI.modify(model, itermodel.thrust_lb_constraint, cstr), mrcs)
+	MOI.modify(model, itermodel.thrust_lb_constraint, MOI.VectorConstantChange(ncsts))
+	MOI.optimize!(model);
+
+	status = MOI.get(model, MOI.TerminationStatus())
+	if status != MOI.OPTIMAL
+	    error("Non-optimal result $status exiting")
+	end
+
+	xr = reshape(MOI.get(model, MOI.VariablePrimal(), reshape(xv, state_dim*(K+1))), state_dim, K+1)
+	ur = reshape(MOI.get(model, MOI.VariablePrimal(), reshape(uv, control_dim*(K+1))), control_dim, K+1)
+	dsr = MOI.get(model, MOI.VariablePrimal(), dsig)
+	nur = (reshape(MOI.get(model, MOI.VariablePrimal(), reshape(nuv, state_dim*(K+1))), state_dim, K+1))
+	dxvr = (reshape(MOI.get(model, MOI.VariablePrimal(), reshape(dxv, state_dim*(K+1))), state_dim, K+1))
+
+	traj_points = [LinPoint(xr[:,n], ur[:,n]) for n=1:K+1]
+	nsig = iteration.sigma + dsr 
+	linpoints = Dynamics.linearize_dynamics_symb(traj_points, iteration.sigma + dsr, linear_cache)
+	return ProblemIteration(prob, iteration.cache, iteration.sigma + dsr, traj_points, linpoints, 
+		iteration.model, iteration.iter+1, 1.0, 1.0), dxvr				
+
+	#=
 	MOI.optimize!(model)
 	status = MOI.get(model, MOI.TerminationStatus())
 	if status != MOI.OPTIMAL
@@ -303,8 +264,8 @@ function solve_step(iteration::ProblemIteration)
 	end
 
 	println(MOI.get(model, MOI.VariablePrimal(), rkv))
-	xs = reshape(MOI.get(model, MOI.VariablePrimal(), reshape(xv, length(xv))), state_dim, K+1)
-	us = reshape(MOI.get(model, MOI.VariablePrimal(), reshape(uv, length(uv))), control_dim, K+1)
+	xs = reshape(MOI.get(model, MOI.VariablePrimal(), reshape(dxv, length(xv))), state_dim, K+1)
+	us = reshape(MOI.get(model, MOI.VariablePrimal(), reshape(duv, length(uv))), control_dim, K+1)
 	dxs = reshape(MOI.get(model, MOI.VariablePrimal(), reshape(dxv, length(xv))), state_dim, K+1)
 	dus = reshape(MOI.get(model, MOI.VariablePrimal(), reshape(duv, length(uv))), control_dim, K+1)
 	nus = reshape(MOI.get(model, MOI.VariablePrimal(), reshape(nuv, length(nuv))), state_dim, K+1)
@@ -380,6 +341,7 @@ function solve_step(iteration::ProblemIteration)
 	end
 	linpoints = Dynamics.linearize_dynamics_symb(traj_points, sigHat + ds, iteration.cache)
 	return ProblemIteration(prob, iteration.cache, sigHat + ds, traj_points, linpoints, iteration.model, iteration.iter+1, next_rk, cost)
+	=#
 end
 
 function run_iters(iprob::DescentProblem, niters::Int)

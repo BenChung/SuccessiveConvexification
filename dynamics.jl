@@ -50,14 +50,6 @@ module Dynamics
                        omegab[3]  omegab[2] -omegab[1]  z         ]
     end
 
-# original DE.jl time: 0.068
-# original rk4 time: 0.031
-
-# naive vects DE.jl: 0.8
-# naive vects rk4: 0.15
-
-
-
     @inline function dx_static(state::AbstractArray{T} where T, u::AbstractArray{T} where T, mult, info::ProbInfo)
         qbi = state[qbi_idx]
         omb = state[omb_idx]
@@ -66,7 +58,7 @@ module Dynamics
 
         thr_acc = DCM(qbi) * (u[thr_idx])
         aero_acc = aerf
-        acc = (thr_acc + aero_acc)./state[mass_idx] # SymEngine.SymFunction("ifnz").(state[mass_idx], )
+        acc = (thr_acc + aero_acc)./state[mass_idx]
         rot_vel = 0.5*Omega(omb)*qbi
         rot_acc = info.jBi*(cross(info.rTB,u) - cross(omb,info.jB*omb))
         return ([-info.a*sqrt(sum(u .^ 2)), 
@@ -75,6 +67,13 @@ module Dynamics
                      rot_vel[1], rot_vel[2], rot_vel[3], rot_vel[4], 
                      rot_acc[1], rot_acc[2], rot_acc[3]]) .* mult
     
+    end
+
+    function h_stc_sym(state)
+        Va,cam = SymEngine.symbols("Va, cam")
+        vel = sqrt(sum(state[v_idx] .^ 2))
+        vdir = transpose(DCM(state[qbi_idx])) * state[v_idx]
+        return -(Va - vel) * (cam * vel + (vdir)[1])
     end
 
     @inline function dx(output, state::AbstractArray{T} where T, u::AbstractArray{T} where T, mult, info::ProbInfo)
@@ -126,7 +125,7 @@ module Dynamics
         return LinRes(x,hcat(dp...) + hcat(Matrix(1.0I, 14, 14), zeros(14,7)))
     end
 
-    function make_dynamics_module(info::ProbInfo, dt::Float64)
+    function make_dynamics_module(info::ProbInfo)
         t=SymEngine.symbols("t")
         dt=SymEngine.symbols("dt")
         lkm = (dt-t)/dt
@@ -134,6 +133,8 @@ module Dynamics
 
         #sig: dx(J, inp, dt, pinfo, t)
         dx_fun = SymbolicUtils.make_simplified(:dx, st -> dx_static(st[stateC], st[ukC]*lkm + st[upC]*lkp, st[sigmaC], info), 21)
+        h_fun = SymbolicUtils.make_simplified(:h, st -> h_stc_sym(st), 14)
+        hx_fun = SymbolicUtils.make_jacobian(:dh, st -> h_stc_sym(st), 14, [], [])
         genmod = quote
             module Linearizer
                 using LinearAlgebra
@@ -163,6 +164,8 @@ module Dynamics
                     return Aerodynamics.direct_lift(p.aero,int_aoa,mach)::T
                 end
                 $dx_fun
+                $h_fun
+                $hx_fun
 
                 @inline function ifnz(val::T, nz::V) where {T,V}
                     if !iszero(val)
@@ -177,29 +180,27 @@ module Dynamics
                     res = dx(du, u, p[1], p[2], t)
                     return 0.0
                 end
-
+                const stateC = 1:14 # @genIdx(1,14)
+                const ukC = 15:17 # @genIdx(15,17)
+                const upC = 18:20 # @genIdx(18,20)
+                const sigmaC = 21
                 function simulate(outp, inp::Vector{T}, dt::Float64, info::ProbInfo, cache::IntegratorCache) where T
-                    state = (@view inp[1:14] )
-                    start_ctrl = (@view inp[15:17])
-                    ed_ctrl = (@view inp[18:20])
-                    i_sigma = inp[21]*dt
                     if isnothing(cache.integrator)
-                        prob = ODEProblem(dx_integrator, inp, convert.(eltype(inp), (0.0,dt)), [dt,info])
-                        cache.integrator = init(prob, BS3(), abstol=1e-2, reltol=1e-2, save_everystep=false)
+                        params = [dt,info]
+                        prob = ODEProblem(dx_integrator, inp, convert.(eltype(inp), (0.0,dt)), params)
+                        cache.integrator = (init(prob, BS3(), abstol=1e-2, reltol=1e-2, save_everystep=false), params)
                     else
-                        reinit!(cache.integrator, inp, 
-                            t0 = convert(eltype(inp), 0.0), tf = convert(eltype(inp), dt),
-                            reset_dt = false)
+                        integrator,params = cache.integrator
+                        reinit!(integrator, inp, 
+                            t0 = convert(eltype(inp), 0.0), tf = convert(eltype(inp), dt), reset_dt = false)
                     end
 
-                    sol = solve!(cache.integrator)
+                    sol = solve!(cache.integrator[1])
                     outp .= sol[end][1:14]
                 end
 
                 function allocate_config()
                     cfg = ForwardDiff.JacobianConfig(nothing, zeros(14), zeros(21))
-                    fill!(cfg.duals[1], zero(eltype(cfg.duals[1])))
-                    fill!(cfg.duals[2], zero(eltype(cfg.duals[2])))
                     return cfg
                 end
 
@@ -281,27 +282,31 @@ module Dynamics
             rk4ps = Array{Float64}(undef, 14)
             inp = vcat(cstate.state, cstate.control, nstate.control, sigma_lin)
             ForwardDiff.jacobian!(res, rk4fun, rk4ps, inp, config)
-            results[i] = LinRes(StaticArrays.SVector{14}(DiffResults.value(res)),StaticArrays.SMatrix{14,21}(DiffResults.jacobian(res)))
+            results[i] = LinRes(DiffResults.value(res),DiffResults.jacobian(res))
         end
         return results
     end
 
+    function initalize_cache(prob::DescentProblem)
+        return initalize_linearizer(ProbInfo(prob), 1/(prob.K+1))
+    end
+
     function initalize_linearizer(prob::ProbInfo, base_dt::Float64)
-        lin_mod = Dynamics.make_dynamics_module(prob, base_dt)
+        lin_mod = Dynamics.make_dynamics_module(prob)
         cache = Base.invokelatest(lin_mod.IntegratorCache, nothing)
         cfg = Base.invokelatest(lin_mod.allocate_config)
         return LinearCache(cfg, cache, prob, base_dt, lin_mod)
     end
-    function linearize_dynamics_symb(states::Array{LinPoint,1}, sigma_lin::Float64, cache::LinearCache)
+    function linearize_dynamics_symb(states::Array{LinPoint,1}, tf_guess::Float64, cache::LinearCache)
         results = Array{LinRes,1}(undef, length(states)-1)
         exout = Array{Float64}(undef, 14)
         exin = Array{Float64}(undef, 21)
         res = DiffResults.JacobianResult(exout, exin)
         for i=1:length(states)-1
-            Base.invokelatest(cache.lin_mod.sensitivity, res, make_state(states[i], states[i+1], sigma_lin),
+            ist = make_state(states[i], states[i+1], tf_guess)
+            Base.invokelatest(cache.lin_mod.sensitivity, res, ist,
                 cache.base_dt, cache.probinfo, cache.cache, cache.cfg)
-            results[i] = LinRes(StaticArrays.SVector{14}(DiffResults.value(res)),
-                    StaticArrays.SMatrix{14,21}(DiffResults.jacobian(res)))
+            results[i] = LinRes(copy(DiffResults.value(res)), copy(DiffResults.jacobian(res)))
         end
         return results
     end

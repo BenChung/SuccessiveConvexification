@@ -35,12 +35,12 @@ function _convert_deriv(ex::Basic, derivs::Dict{Deriv, Symbol}, substs::Dict{Sym
 	key = Deriv(fnd, sig)
 	dfun = derivs[key]
 
-	return Expr(:call, dfun, [_convert_diff(Expr, a, derivs, substs) for a in fnargs]...)
+	return Expr(:call, dfun, [_convert_diff(a, derivs, substs) for a in fnargs]...)
 end
 
 SymEngine.N(b::SymEngine.BasicType{Val{:Integer}}) = convert(Float64, convert(BigInt, b))
 SymEngine.N(b::SymEngine.BasicType{Val{:Rational}}) = N(numerator(b))/N(denominator(b))
-function _convert_diff(::Type{Expr}, ex::Basic, derivs::Dict{Deriv, Symbol}, substs::Dict{Symbol, Any})
+function _convert_diff(ex::Basic, derivs::Dict{Deriv, Symbol}, substs::Dict{Symbol, Any})
     fn = SymEngine.get_symengine_class(ex)
     if fn == :Symbol
     	sym = Symbol(SymEngine.toString(ex))
@@ -53,8 +53,8 @@ function _convert_diff(::Type{Expr}, ex::Basic, derivs::Dict{Deriv, Symbol}, sub
         return N(ex)
     elseif fn == :Pow
     	as = SymEngine.get_args(ex)
-    	bdy = _convert_diff(Expr, as[1], derivs, substs)
-    	pow = _convert_diff(Expr, as[2], derivs, substs)
+    	bdy = _convert_diff(as[1], derivs, substs)
+    	pow = _convert_diff(as[2], derivs, substs)
     	if pow == 0.5
     		return :(sqrt($bdy))
     	elseif pow == -0.5
@@ -73,19 +73,19 @@ function _convert_diff(::Type{Expr}, ex::Basic, derivs::Dict{Deriv, Symbol}, sub
     elseif fn == :Subs
     	nsubsts = copy(substs)
     	args = SymEngine.get_args(ex)
-    	nsubsts[_convert_diff(Expr, args[2], derivs, substs)] = 
-    		_convert_diff(Expr, args[3], derivs, substs)
-    	return _convert_diff(Expr, args[1], derivs, nsubsts)
+    	nsubsts[_convert_diff(args[2], derivs, substs)] = 
+    		_convert_diff(args[3], derivs, substs)
+    	return _convert_diff(args[1], derivs, nsubsts)
     end
 
     as = SymEngine.get_args(ex)
 
     Expr(:call, SymEngine.map_fn(fn, SymEngine.fn_map),
-    	 [_convert_diff(Expr,a,derivs,substs) for a in as]...)
+    	 [_convert_diff(a,derivs,substs) for a in as]...)
 end
 
 
-function convert_diff(::Type{Expr}, ex::Basic, derivs::Dict{Deriv, Symbol}, substs::Dict{Symbol, Any})
+function convert_diff(ex::Basic, derivs::Dict{Deriv, Symbol}, substs::Dict{Symbol, Any})
     fn = SymEngine.get_symengine_class(ex)
 
     if fn == :Symbol
@@ -94,66 +94,79 @@ function convert_diff(::Type{Expr}, ex::Basic, derivs::Dict{Deriv, Symbol}, subs
         return SymEngine.N(ex)
     end
 
-    return _convert_diff(Expr, ex, derivs, substs)
+    return _convert_diff(ex, derivs, substs)
 end
 
-function make_simplified(name, fun, nargs)
+function convert_diff(exes::Array{Basic, D} where D, derivs::Dict{Deriv, Symbol}, substs::Dict{Symbol, Any})
+	return map(expr -> convert_diff(expr, derivs, substs), exes)
+end
+
+function make_simplified(name, fun, nargs; postprocess = nothing, expected_args = Set{Symbol}())
 	# symbolically execute the body
 	args = [symbols("x$i") for i = 1:nargs]
 	retv = fun(args)
-	exprs = map(x -> convert_diff(Expr, x, Dict{Deriv,Symbol}(), Dict{Symbol,Any}()), retv)
-	rexpr = Expr(:vect, exprs...)
+	exprs = convert_diff(retv, Dict{Deriv,Symbol}(), Dict{Symbol,Any}())
+	if exprs isa Array{T, 1} where T
+		rexpr = Expr(:vect, exprs...)
+	elseif exprs isa Array{T, 2} where T
+		rexpr = Expr(:vect, reshape(exprs, length(exprs))...)
+	else 
+		rexpr = Expr(:vect, exprs)
+	end
+	if !isnothing(postprocess)
+		rexpr = postprocess(rexpr)
+	end
 	body = macroexpand(CommonSubexpressions,:(@cse $rexpr))
 
 	# compute the extra arguments
 	need_args = Set{Symbol}()
 	map(x -> push!(need_args, x), vcat(map(x -> map(Symbol, SymEngine.free_symbols(x)), retv)...))
+	needed_state = intersect(need_args, Set{Symbol}(map(Symbol, args)))
 	map(x -> delete!(need_args, Symbol(x)), args)
-	ordered_args = sort(collect(need_args))
+	ordered_args = sort(collect(union(need_args, expected_args)))
 
 	# generate the header
-	header = map(x -> :($(Symbol(x[2])) = inp[$(x[1])]), enumerate(args))
+	header = map((idx,var) -> :($(Symbol(var)) = inp[$idx]), 
+		parse.(Int, map(x -> String(x)[2:end], collect(needed_state))), needed_state)
 
 	# generate the in-place assignment
-	assignment = map(x -> :(J[$(x[1])] = $(x[2])), enumerate(body.args[end].args))
+	if exprs isa Array{T, 1} where T
+		assignment = map(x -> :(J[$(x[1])] = $(x[2])), enumerate(body.args[end].args))
+	elseif exprs isa Array{T, 2} where T
+		bargs = reshape(body.args[end].args, size(exprs))
+		assignment = vcat([[:(J[$rown, $coln] = $(bargs[rown, coln]))
+				for (rown, cell) in enumerate(col)] 
+				for (coln, col) in enumerate(eachcol(exprs))]...)
+	else 
+		assignment = Expr[:(return $(body.args[end].args...))]
+	end
+	
 
 	#output the simplified function
 	fbody = (Expr(:block, header...,
 				 body.args[1:end-1]...,
 				 assignment...))
-	return :($(name)(J, inp, $(ordered_args...)) = $(fbody.args...))
+
+	if exprs isa Array
+		return :($(name)(J, inp, $(ordered_args...)) = $(fbody.args...))
+	else 
+		return :($(name)(inp, $(ordered_args...)) = $(fbody.args...))
+	end
 end
 
 function make_jacobian(fnname, fun, nargs, idfs, ivects)
+	#=
 	dfs = Dict{Deriv,Symbol}(
 		[Deriv(c.args[2].args[1], [c.args[2].args[2:end]...]) => c.args[3] for c in idfs.args])
 	vects = Dict{Symbol,Tuple{Symbol, Int}}(
 		[c.args[2] => (c.args[3].args[1], c.args[3].args[2]) for c in ivects.args])
-
-	args = [symbols("x$i") for i = 1:nargs]
-	symbolic = eval(:($fun($args)))
-	jacobian = [convert_diff(Expr, diff(symbolic[v],j), dfs, Dict{Symbol, Any}()) 
-					for v in 1:length(symbolic), j in args]
-	mat = Expr(:vcat, [Expr(:row, jacobian[i,:]...) for i in 1:length(symbolic)]...)
-	reped = postwalk(x -> x isa Expr && x.head == :call && haskey(vects, x.args[1]) ? 
-		begin (fn,idx)=vects[x.args[1]]; op = :($(fn)($(x.args[2:end]...))[$(idx)]); op end : x, mat)
-	csed = macroexpand(CommonSubexpressions,:(@cse $reped))
-
-	# we know that csed is of form assignment... matrix; get the matrix
-	fmat = csed.args[end]
-	mat_ass = Expr[]
-	for (row,els) in enumerate(fmat.args)
-		for (col,el) in enumerate(els.args)
-			if el != 0.0
-				push!(mat_ass, :(J[$row,$col] = $el))
-			end
-		end
-	end
-	body = Expr(:block,
-			[:($(Symbol(el[2])) = arg[$(el[1])]) for el in enumerate(args)]...,
-			csed.args[1:end-1]...,
-			mat_ass...)
-	return :($(esc(fnname))(t, arg, J) = $(body.args...))
+	;
+		postprocess = mat -> postwalk(x -> x isa Expr && x.head == :call && haskey(vects, x.args[1]) ? 
+				begin (fn,idx)=vects[x.args[1]]; op = :($(fn)($(x.args[2:end]...))[$(idx)]); op end : x, mat)
+		=#
+	return make_simplified(fnname, x -> begin frs = fun(x); 
+		res = [diff(row, var) for row in frs, var in x];
+		return res end, nargs)
 end
 #=
 

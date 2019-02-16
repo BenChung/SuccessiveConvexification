@@ -113,10 +113,10 @@ function linear_points(problem::DescentProblem)
         vIk = (K-k)/(K) * problem.vIi + (k/(K))*problem.vIf
 
         rot = rotation_between([1,0,0], -vIk)
-        qBIk = @SVector [rot.w, rot.x, rot.y, rot.z]
-        TBk = @SVector [mk*problem.g,0,0]
-        state_init = vcat(mk,rIk,vIk,qBIk,(@SVector [0.0,0,0]))
-        control_init = @SVector [mk*problem.g,0,0]
+        qBIk = [rot.w, rot.x, rot.y, rot.z]
+        TBk = [mk*problem.g,0,0]
+        state_init = vcat(mk,rIk,vIk,qBIk,([0.0,0,0]))
+        control_init = [mk*problem.g,0,0]
         initial_points[k+1] = LinPoint(state_init, control_init)
     end
     return initial_points
@@ -124,7 +124,8 @@ end
 
 function linear_initial(problem::DescentProblem, cache::Dynamics.LinearCache)
     initial_points = linear_points(problem)
-    return initial_points,Dynamics.linearize_dynamics_symb(initial_points, problem.tf_guess, cache)
+    return initial_points, #Dynamics.linearize_dynamics(initial_points, problem.tf_guess, 1/(problem.K+1), ProbInfo(problem))
+        Dynamics.linearize_dynamics_symb(initial_points, problem.tf_guess, cache)
 end
 
 end
