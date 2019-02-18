@@ -97,7 +97,7 @@ function compute_fin_force_table()
 	sleep(4)
 
 	function aero_profile()
-		return map(x -> [x...], kRPC.SendMessage(conn, [begin frcc,trqc,vv = compute_aero_forces(mach, 1.0); frcc end for mach=0.01:0.05:1.5]))
+		return map(x -> [x...], kRPC.SendMessage(conn, [begin frcc,trqc,vv = compute_aero_forces(mach, 1.0); frcc end for mach=0.01:0.025:1.5]))
 	end
 	bl = aero_profile()
 	forces = Vector{Vector{Float64}}[]
@@ -106,7 +106,7 @@ function compute_fin_force_table()
 		sleep(0.2)
 		push!(forces, aero_profile())
 	end
-	aerod = hcat(map((force,aoa) -> vcat(hcat((force .- bl)...), transpose(collect(0.01:0.05:1.5)), fill(aoa, 1, length(bl))), forces, 0.0:1.0:90.0)...)
+	aerod = hcat(map((force,aoa) -> vcat(hcat((force .- bl)...), transpose(collect(0.01:0.025:1.5)), fill(aoa, 1, length(bl))), forces, 0.0:1.0:90.0)...)
 	df = DataFrame(lift=aerod[2,:], drag=aerod[1,:], mach=aerod[4,:], aoa=aerod[5,:])
 	CSV.write("fin.csv", df);
 end
