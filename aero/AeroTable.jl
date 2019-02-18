@@ -50,30 +50,36 @@ function sweep_aero()
 	ctorque = kRPC.kPC[]
 	drg = Vector{Float64}[]
 	lft = Vector{Float64}[]
+	trq = Vector{Float64}[]
 	aoal = Float64[]
 	machl = Float64[]
 	for mach=0.0:0.025:1.5
 		for cos_aoa=cosd(180):1/90:cosd(0)
 			cll,ctr,bv = compute_aero_forces(mach, cos_aoa)
 			push!(cforce, cll)
-			push!(ctorque, cll)
+			push!(ctorque, ctr)
 			normbv = bv/norm(bv)
 			push!(drg, normbv)
-			liftd = cross(cross([1.0,0.0,0.0], normbv),normbv)
+			torqd = cross(normbv, [1.0,0.0,0.0])
+			liftd = cross(torqd,normbv)
 			liftd = liftd/norm(liftd)
 			push!(lft, liftd)
+			push!(trq, torqd/norm(torqd))
 			push!(aoal, cos_aoa)
 			push!(machl, mach)
 		end
 	end
 	res = kRPC.SendMessage(conn, cforce)
 	tres = kRPC.SendMessage(conn, ctorque)
-	hcat(([aoal[i], machl[i], if !isnan(dot(res[i], drg[i])) dot(res[i], drg[i]) else 0.0 end, if !isnan(dot(res[i], lft[i])) dot(res[i], lft[i]) else 0.0 end] for i=1:length(res))...)
+	hcat(([aoal[i], machl[i], 
+			if !isnan(dot(res[i], drg[i])) dot(res[i], drg[i]) else 0.0 end, 
+			if !isnan(dot(res[i], lft[i])) dot(res[i], lft[i]) else 0.0 end, 
+			if !isnan(dot(tres[i], trq[i])) dot(tres[i], trq[i]) else 0.0 end] for i=1:length(res))...)
 end
 
 aero_force = sweep_aero()'
-aero_df = DataFrame(aoa=aero_force[:,1], mach=aero_force[:,2], drag=aero_force[:,3], lift=aero_force[:,4])
-CSV.write("lift_drag.csv", aero_df)
+aero_df = DataFrame(aoa=aero_force[:,1], mach=aero_force[:,2], drag=aero_force[:,3], lift=aero_force[:,4], torque=aero_force[:,5])
+CSV.write("lift_drag.csv", aero_df);
 #=
 
 function compute_aero_forces_tform(bv,vv)
@@ -203,5 +209,4 @@ end
 =#
 
 finally
-kRPCDisconnect(conn)
 end
