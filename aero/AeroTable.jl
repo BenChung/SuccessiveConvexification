@@ -8,7 +8,7 @@ using kRPC.Remote.SpaceCenter
 totable = 1
 outp_a = 1
 outp_b = 1
-try 
+
 vessel = ActiveVessel()
 flight = Flight(vessel)
 orbit = Orbit(vessel)
@@ -77,9 +77,40 @@ function sweep_aero()
 			if !isnan(dot(tres[i], trq[i])) dot(tres[i], trq[i]) else 0.0 end] for i=1:length(res))...)
 end
 
-aero_force = sweep_aero()'
-aero_df = DataFrame(aoa=aero_force[:,1], mach=aero_force[:,2], drag=aero_force[:,3], lift=aero_force[:,4], torque=aero_force[:,5])
-CSV.write("lift_drag.csv", aero_df);
+function compute_aero_table()
+	aero_force = sweep_aero()'
+	aero_df = DataFrame(aoa=aero_force[:,1], mach=aero_force[:,2], drag=aero_force[:,3], lift=aero_force[:,4], torque=aero_force[:,5])
+	CSV.write("lift_drag.csv", aero_df);
+end
+
+pts = Parts(vessel)
+finsOn = WithTag(pts, "nosefins2")
+fin1 = Modules(finsOn[1])[1]
+fin2 = Modules(finsOn[2])[1]
+finsOff = WithTag(pts, "nosefins")
+fin3 = Modules(finsOff[1])[1]
+fin4 = Modules(finsOff[2])[1]
+
+function compute_fin_force_table()
+	SetFieldFloat.([fin3,fin4], "Flp/Splr Dflct", convert(Float32, 0))
+	SetFieldFloat.([fin1,fin2], "Flp/Splr Dflct", convert(Float32, 0))
+	sleep(4)
+
+	function aero_profile()
+		return map(x -> [x...], kRPC.SendMessage(conn, [begin frcc,trqc,vv = compute_aero_forces(mach, 1.0); frcc end for mach=0.01:0.05:1.5]))
+	end
+	bl = aero_profile()
+	forces = Vector{Vector{Float64}}[]
+	for ang=0.0:1.0:90.0
+		SetFieldFloat.([fin1,fin2], "Flp/Splr Dflct", convert(Float32, ang))
+		sleep(0.2)
+		push!(forces, aero_profile())
+	end
+	aerod = hcat(map((force,aoa) -> vcat(hcat((force .- bl)...), transpose(collect(0.01:0.05:1.5)), fill(aoa, 1, length(bl))), forces, 0.0:1.0:90.0)...)
+	df = DataFrame(lift=aerod[2,:], drag=aerod[1,:], mach=aerod[4,:], aoa=aerod[5,:])
+	CSV.write("fin.csv", df);
+end
+
 #=
 
 function compute_aero_forces_tform(bv,vv)
@@ -207,6 +238,3 @@ for result in totable
 end
 =#
 =#
-
-finally
-end
