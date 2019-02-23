@@ -101,12 +101,12 @@ function compute_fin_force_table()
 	end
 	bl = aero_profile()
 	forces = Vector{Vector{Float64}}[]
-	for ang=0.0:1.0:90.0
+	for ang=0.0:0.1:90.0
 		SetFieldFloat.([fin1,fin2], "Flp/Splr Dflct", convert(Float32, ang))
-		sleep(0.2)
+		sleep(0.1)
 		push!(forces, aero_profile())
 	end
-	aerod = hcat(map((force,aoa) -> vcat(hcat((force .- bl)...), transpose(collect(0.01:0.025:1.5)), fill(aoa, 1, length(bl))), forces, 0.0:1.0:90.0)...)
+	aerod = hcat(map((force,aoa) -> vcat(hcat((force .- bl)...), transpose(collect(0.01:0.025:1.5)), fill(aoa, 1, length(bl))), forces, 0.0:0.1:90.0)...)
 	df = DataFrame(lift=aerod[2,:], drag=aerod[1,:], mach=aerod[4,:], aoa=aerod[5,:])
 	CSV.write("fin.csv", df);
 end
