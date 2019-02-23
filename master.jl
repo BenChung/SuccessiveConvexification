@@ -74,8 +74,9 @@ module RocketlandDefns
 	    jB::SArray{Tuple{3,3},Float64,2,9}
 	    jBi::SArray{Tuple{3,3},Float64,2,9}
 	    rTB::SArray{Tuple{3}, Float64, 1, 3}
+	    rFB::SArray{Tuple{3}, Float64, 1, 3}
 	    aero::AerodynamicInfo
-	    ProbInfo(from::DescentProblem) = new(from.alpha, from.g, from.sos, SMatrix{3,3}(from.jB), SMatrix{3,3}(inv(from.jB)), SVector{3}(from.rTB), from.aero)
+	    ProbInfo(from::DescentProblem) = new(from.alpha, from.g, from.sos, SMatrix{3,3}(from.jB), SMatrix{3,3}(inv(from.jB)), SVector{3}(from.rTB), SVector{3}(from.rFB), from.aero)
 	end
 
 	struct LinPoint

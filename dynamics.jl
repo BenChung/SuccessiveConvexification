@@ -56,12 +56,17 @@ module Dynamics
 
         aerf = Aerodynamics.aero_force(info.aero,DCM(qbi) * [1.0,0.0,0.0],(@view state[5:7]),info.sos)
 
-        thr_acc = DCM(qbi) * (u[thr_idx])
-        aero_acc = aerf
-        acc = (thr_acc + aero_acc)./state[mass_idx]
+        fd1 = cross(DCM(qbi) * [0.0,1.0,0.0], state[5:7])
+        fd1 = fd1/sqrt(sum(fd1 .^ 2))
+        fd2 = cross(fd1, state[5:7])
+        ff = u[4] * fd1 + u[5] * fd2
+
+        thr_frc = DCM(qbi) * (u[thr_idx])
+        aero_frc = aerf
+        acc = (thr_frc + aero_frc + ff)./state[mass_idx]
         rot_vel = 0.5*Omega(omb)*qbi
-        rot_acc = info.jBi*(cross(info.rTB,u) - cross(omb,info.jB*omb))
-        return ([-info.a*sqrt(sum(u .^ 2)), 
+        rot_acc = info.jBi*(cross(info.rTB,u[thr_idx]) + cross(info.rFB, ff) - cross(omb,info.jB*omb))
+        return ([-info.a*sqrt(sum(u[thr_idx] .^ 2)), 
                      state[5],state[6],state[7], 
                      acc[1]-info.g0, acc[2], acc[3], 
                      rot_vel[1], rot_vel[2], rot_vel[3], rot_vel[4], 
@@ -85,9 +90,9 @@ module Dynamics
         #return :(@SVector [i for i=$start:$last])
     end
     const stateC = 1:14 # @genIdx(1,14)
-    const ukC = 15:17 # @genIdx(15,17)
-    const upC = 18:20 # @genIdx(18,20)
-    const sigmaC = 21
+    const ukC = 15:19 # @genIdx(15,17)
+    const upC = 20:24 # @genIdx(18,20)
+    const sigmaC = 25
 
     function make_dyn(dt,pinfo)
         @inline function dynamics_sim(ipm, state, p, t)
@@ -132,7 +137,8 @@ module Dynamics
         lkp = t/dt
 
         #sig: dx(J, inp, dt, pinfo, t)
-        dx_fun = SymbolicUtils.make_simplified(:dx, st -> dx_static(st[stateC], st[ukC]*lkm + st[upC]*lkp, st[sigmaC], info), 21)
+        dx_fun = SymbolicUtils.make_simplified(:dx, st -> dx_static(st[stateC], st[ukC]*lkm + st[upC]*lkp, st[sigmaC], info), 25)
+        println(dx_fun)
         h_fun = SymbolicUtils.make_simplified(:h, st -> h_stc_sym(st), 14)
         hx_fun = SymbolicUtils.make_jacobian(:dh, st -> h_stc_sym(st), 14, [], [])
         genmod = quote
@@ -200,7 +206,7 @@ module Dynamics
                 end
 
                 function allocate_config()
-                    cfg = ForwardDiff.JacobianConfig(nothing, zeros(14), zeros(21))
+                    cfg = ForwardDiff.JacobianConfig(nothing, zeros(14), zeros(25))
                     return cfg
                 end
 
@@ -300,7 +306,7 @@ module Dynamics
     function linearize_dynamics_symb(states::Array{LinPoint,1}, tf_guess::Float64, cache::LinearCache)
         results = Array{LinRes,1}(undef, length(states)-1)
         exout = Array{Float64}(undef, 14)
-        exin = Array{Float64}(undef, 21)
+        exin = Array{Float64}(undef, 25)
         res = DiffResults.JacobianResult(exout, exin)
         for i=1:length(states)-1
             ist = make_state(states[i], states[i+1], tf_guess)
