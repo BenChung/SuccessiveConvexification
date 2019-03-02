@@ -9,7 +9,9 @@ module RocketlandDefns
 	struct AtmosphericData <: AerodynamicInfo
 		drag_itrp :: Interpolations.ScaledInterpolation{Float64, 2, T, U, V} where {T, U, V}
 		lift_itrp :: Interpolations.ScaledInterpolation{Float64, 2, T, U, V} where {T, U, V}
-		scalar :: Float64
+		trq_itrp :: Interpolations.ScaledInterpolation{Float64, 2, T, U, V} where {T, U, V}
+		force_scalar :: Float64
+		length_scalar :: Float64
 	end
 	struct DescentProblem
 	    g::Float64

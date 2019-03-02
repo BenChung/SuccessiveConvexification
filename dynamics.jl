@@ -54,7 +54,7 @@ module Dynamics
         qbi = state[qbi_idx]
         omb = state[omb_idx]
 
-        aerf = Aerodynamics.aero_force(info.aero,DCM(qbi) * [1.0,0.0,0.0],(@view state[5:7]),info.sos)
+        aerf, bdy_trq = Aerodynamics.aero_force(info.aero,DCM(qbi) * [1.0,0.0,0.0],(@view state[5:7]),info.sos)
 
         fd1 = cross(DCM(qbi) * [0.0,1.0,0.0], state[5:7])
         fd1 = fd1/sqrt(sum(fd1 .^ 2))
@@ -62,10 +62,11 @@ module Dynamics
         ff = u[4] * fd1 + u[5] * fd2
 
         thr_frc = DCM(qbi) * (u[thr_idx])
-        aero_frc = aerf
-        acc = (thr_frc + aero_frc + ff)./state[mass_idx]
+        aero_frc = aerf + ff
+        acc = (thr_frc + aero_frc)./state[mass_idx]
         rot_vel = 0.5*Omega(omb)*qbi
-        rot_acc = info.jBi*(cross(info.rTB,u[thr_idx]) + cross(info.rFB, ff) - cross(omb,info.jB*omb))
+        aero_trq = cross(info.rFB, ff) + bdy_trq
+        rot_acc = info.jBi*(cross(info.rTB,u[thr_idx]) + aero_trq - cross(omb,info.jB*omb))
         return ([-info.a*sqrt(sum(u[thr_idx] .^ 2)), 
                      state[5],state[6],state[7], 
                      acc[1]-info.g0, acc[2], acc[3], 
@@ -138,7 +139,6 @@ module Dynamics
 
         #sig: dx(J, inp, dt, pinfo, t)
         dx_fun = SymbolicUtils.make_simplified(:dx, st -> dx_static(st[stateC], st[ukC]*lkm + st[upC]*lkp, st[sigmaC], info), 25)
-        println(dx_fun)
         h_fun = SymbolicUtils.make_simplified(:h, st -> h_stc_sym(st), 14)
         hx_fun = SymbolicUtils.make_jacobian(:dh, st -> h_stc_sym(st), 14, [], [])
         genmod = quote
@@ -168,6 +168,13 @@ module Dynamics
                         int_aoa = clamp(cos_aoa/(mach*p.sos),-1.0,1.0)
                     end
                     return Aerodynamics.direct_lift(p.aero,int_aoa,mach)::T
+                end
+                function trq(cos_aoa::T,mach::T,p::ProbInfo) where T
+                    int_aoa = zero(T)
+                    if mach > zero(T)
+                        int_aoa = clamp(cos_aoa/(mach*p.sos),-1.0,1.0)
+                    end
+                    return Aerodynamics.direct_trq(p.aero,int_aoa,mach)::T
                 end
                 $dx_fun
                 $h_fun

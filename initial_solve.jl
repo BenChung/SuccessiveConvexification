@@ -116,7 +116,7 @@ function linear_points(problem::DescentProblem)
         qBIk = [rot.w, rot.x, rot.y, rot.z]
         TBk = [mk*problem.g,0,0]
         state_init = vcat(mk,rIk,vIk,qBIk,([0.0,0,0]))
-        control_init = [mk*problem.g,0,0]
+        control_init = [mk*problem.g,0,0,0,0]
         initial_points[k+1] = LinPoint(state_init, control_init)
     end
     return initial_points

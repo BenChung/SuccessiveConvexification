@@ -13,7 +13,7 @@ import ..FirstRound
 
 #state indexing
 const state_dim = 14
-const control_dim = 3
+const control_dim = 5
 const r_idx_it = 2:4
 const v_idx_it = 5:7
 const qbi_idx_it = 8:11
@@ -168,7 +168,7 @@ function build_model(prob, K, iterDynam, iterAbout, sigHat)
 	MOI.add_constraint(model, VAF([VA.(1:K+1, SA.(1.0,mtk)); VA.(1:K+1, SA.(-1/delMax, uv[1,:]))], zeros(K+1)), MOI.Nonpositives(K+1))
 
 	for n=1:K+1
-		MOI.add_constraint(model, VoV([mtk[n]; uv[:, n]]), SOC(4))
+		MOI.add_constraint(model, VoV([mtk[n]; uv[1:3, n]]), SOC(4))
 	end
 
 	#linearized thrust lower bound constraint (8 & 35)
@@ -176,9 +176,17 @@ function build_model(prob, K, iterDynam, iterAbout, sigHat)
 	# h_tlb,k + H_tlb,k duk <= 0
 	# h_tlb,k = Tmin - ||uk_lin||
 	# H_tlb,k = d(Tmin-||uk_lin||)/duk_lin = -d(uk_lin)/duk_lin = -uk_lin.../norm(uk_lin)
-	tlbvars = vcat((VA.(fill(n,3), SA.(-(iterAbout[n].control ./ norm(iterAbout[n].control)), duv[:,n])) for n=1:K+1)...)
+	tlbvars = vcat((VA.(fill(n,3), SA.(-(iterAbout[n].control[1:3] ./ norm(iterAbout[n].control[1:3])), duv[1:3,n])) for n=1:K+1)...)
 	tlbconsts = [(prob.Tmin - norm(iterAbout[n].control)) for n=1:K+1]
 	thrust_lb_constraint = MOI.add_constraint(model, VAF(tlbvars, tlbconsts), MOI.Nonpositives(K+1))
+
+	# simple fin constraints 
+	finmxf = MOI.add_variables(model, K+1)
+	#MOI.add_constraint(model, VAF(VA.(1:K+1, SA.(1.0, finmxf)), fill(-0.01,K+1)), MOI.Zeros(K+1))
+	for n=1:K+1
+		MOI.add_constraint(model, VAF(VA.(1:2, SA.(1.0, uv[4:5, n])), fill(-0.000001,2)), MOI.Nonpositives(2))
+		#MOI.add_constraint(model, VoV([finmxf[n]; uv[4:5, n]]), SOC(3))
+	end
 
 	# state triggered constraints
 	
@@ -222,9 +230,9 @@ function solve_step(iteration::ProblemIteration, linear_cache::LinearCache)
 	end
 
 	# fix the thrust lower bound
-	mrcs = vcat((MOI.MultirowChange.(duv[:, n], 
-				 map(x->[(n, x)], -about[n].control ./ norm(about[n].control))) for n=1:K+1)...)
-	ncsts = [(prob.Tmin - norm(about[n].control)) for n=1:K+1]
+	mrcs = vcat((MOI.MultirowChange.(duv[1:3, n], 
+				 map(x->[(n, x)], -about[n].control[1:3] ./ norm(about[n].control[1:3]))) for n=1:K+1)...)
+	ncsts = [(prob.Tmin - norm(about[n].control[1:3])) for n=1:K+1]
 	map(cstr -> MOI.modify(model, itermodel.thrust_lb_constraint, cstr), mrcs)
 	MOI.modify(model, itermodel.thrust_lb_constraint, MOI.VectorConstantChange(ncsts))
 	MOI.optimize!(model);
@@ -241,6 +249,7 @@ function solve_step(iteration::ProblemIteration, linear_cache::LinearCache)
 	dxvr = (reshape(MOI.get(model, MOI.VariablePrimal(), reshape(dxv, state_dim*(K+1))), state_dim, K+1))
 
 	traj_points = [LinPoint(xr[:,n], ur[:,n]) for n=1:K+1]
+	#return traj_points
 	nsig = iteration.sigma + dsr 
 	linpoints = Dynamics.linearize_dynamics_symb(traj_points, iteration.sigma + dsr, linear_cache)
 	return ProblemIteration(prob, iteration.cache, iteration.sigma + dsr, traj_points, linpoints, 
@@ -387,9 +396,9 @@ function plot_solution(ip::ProblemIteration)
 	println(thr)
 	p=plot(xs,ys, xlims = (tmin,tmax), layout=2, legend=false)
 	for pt in ip.about
-		dp = dot(Dynamics.DCM(SVector{4}(pt.state[qbi_idx_it]))*[1.0,0,0], pt.state[v_idx_it])/norm(pt.state[v_idx_it])
+		dp = dot(Dynamics.DCM(pt.state[qbi_idx_it])*[1.0,0,0], pt.state[v_idx_it])/norm(pt.state[v_idx_it])
 		println(dp)
-		dv = Dynamics.DCM(SVector{4}(pt.state[qbi_idx_it]))*[1.0,0,0]
+		dv = Dynamics.DCM(pt.state[qbi_idx_it])	*[1.0,0,0]
 		xls = [pt.state[3] pt.state[4]; pt.state[3]+dv[2]/3 pt.state[4]+dv[3]/3]
 		yls = [pt.state[2] pt.state[2]; pt.state[2]+dv[1]/3 pt.state[2]+dv[1]/3]
 		plot!(p,xls,yls, layout=2)
