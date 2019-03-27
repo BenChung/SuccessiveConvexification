@@ -119,12 +119,6 @@ module Dynamics
         dx(ipm, state, p.controlK*lkm + p.controlKp*lkp, p.sigma, p.pinfo)
     end
 
-    function predict_state(initial_state, uk, up, sigma, dt, pinfo)
-        prob = ODEProblem(control_dx, vcat(initial_state, Float64[]), (0.0,dt), StateInfo(uk, up, sigma, dt, pinfo))
-        sol = solve(prob, Vern9(), save_everystep=false)
-        return sol[end]
-    end
-
     function linearize_segment(int,dt)
         sol = DifferentialEquations.solve!(int)
         x,dp = extract_local_sensitivities(int.sol,dt)
@@ -151,7 +145,8 @@ module Dynamics
                 import ..Aerodynamics
 
                 mutable struct IntegratorCache
-                    integrator::Any
+                    prim_integrator::Any
+                    dual_integrator::Any
                 end
 
                 function drag(cos_aoa::T,mach::T,p::ProbInfo) where T
@@ -197,18 +192,33 @@ module Dynamics
                 const ukC = 15:17 # @genIdx(15,17)
                 const upC = 18:20 # @genIdx(18,20)
                 const sigmaC = 21
-                function simulate(outp, inp::Vector{T}, dt::Float64, info::ProbInfo, cache::IntegratorCache) where T
-                    if isnothing(cache.integrator)
+                function simulate(outp, inp::Vector{T}, dt::Float64, info::ProbInfo, cache::IntegratorCache) where T <: AbstractFloat
+                    if isnothing(cache.prim_integrator)
                         params = [dt,info]
                         prob = ODEProblem(dx_integrator, inp, convert.(eltype(inp), (0.0,dt)), params)
-                        cache.integrator = (init(prob, BS3(), abstol=1e-2, reltol=1e-2, save_everystep=false), params)
+                        cache.prim_integrator = (init(prob, BS3(), abstol=1e-2, reltol=1e-2, save_everystep=false), params)
                     else
-                        integrator,params = cache.integrator
+                        integrator,params = cache.prim_integrator
                         reinit!(integrator, inp, 
                             t0 = convert(eltype(inp), 0.0), tf = convert(eltype(inp), dt), reset_dt = false)
                     end
 
-                    sol = solve!(cache.integrator[1])
+                    sol = solve!(cache.prim_integrator[1])
+                    outp .= sol[end][1:14]
+                end
+
+                function simulate(outp, inp::Vector{T}, dt::Float64, info::ProbInfo, cache::IntegratorCache) where T <: ForwardDiff.Dual
+                    if isnothing(cache.dual_integrator)
+                        params = [dt,info]
+                        prob = ODEProblem(dx_integrator, inp, convert.(eltype(inp), (0.0,dt)), params)
+                        cache.dual_integrator = (init(prob, BS3(), abstol=1e-2, reltol=1e-2, save_everystep=false), params)
+                    else
+                        integrator,params = cache.dual_integrator
+                        reinit!(integrator, inp, 
+                            t0 = convert(eltype(inp), 0.0), tf = convert(eltype(inp), dt), reset_dt = false)
+                    end
+
+                    sol = solve!(cache.dual_integrator[1])
                     outp .= sol[end][1:14]
                 end
 
@@ -306,17 +316,32 @@ module Dynamics
 
     function initalize_linearizer(prob::ProbInfo, base_dt::Float64)
         lin_mod = Dynamics.make_dynamics_module(prob)
-        cache = Base.invokelatest(lin_mod.IntegratorCache, nothing)
+        cache = Base.invokelatest(lin_mod.IntegratorCache, nothing, nothing)
         cfg = Base.invokelatest(lin_mod.allocate_config)
         return LinearCache(cfg, cache, prob, base_dt, lin_mod)
     end
-    function linearize_dynamics_symb(states::Array{LinPoint,1}, tf_guess::Float64, cache::LinearCache)
+
+
+    function predict_state(initial_state, uk, up, sigma, dt, pinfo, cache)
+        res = Array{Float64}(undef, 14)
+        Base.invokelatest(cache.lin_mod.simulate, res, [initial_state; uk; up; sigma], dt, pinfo, cache.cache)
+        return res
+    end
+
+    function linearize_dynamics_symb(states::Array{LinPoint,1}, tf_guesses::Tuple{Varargs{Float64, N}}, splits::Tuple{Varargs{Int, K}}, cache::LinearCache) where {N,K}
         results = Array{LinRes,1}(undef, length(states)-1)
         exout = Array{Float64}(undef, 14)
         exin = Array{Float64}(undef, 25)
         res = DiffResults.JacobianResult(exout, exin)
+
+        c_split = 1
+        c_tf = tf_guesses[c_split]
         for i=1:length(states)-1
-            ist = make_state(states[i], states[i+1], tf_guess)
+            if i > splits[c_split] 
+                c_split += 1
+                c_tf = tf_guesses[c_split]
+            end
+            ist = make_state(states[i], states[i+1], tf_guesses)
             Base.invokelatest(cache.lin_mod.sensitivity, res, ist,
                 cache.base_dt, cache.probinfo, cache.cache, cache.cfg)
             results[i] = LinRes(copy(DiffResults.value(res)), copy(DiffResults.jacobian(res)))

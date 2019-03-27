@@ -100,10 +100,13 @@ module RocketlandDefns
 		duv::Array{MOI.VariableIndex,2}
 		dsv::MOI.VariableIndex
 		nuv::Array{MOI.VariableIndex,2}
+		rk::MOI.VariableIndex
 		state_base::MOI.ConstraintIndex
 		control_base::MOI.ConstraintIndex
 		dynamic_constraints::Vector{MOI.ConstraintIndex}
 		thrust_lb_constraint::MOI.ConstraintIndex
+		rkc::MOI.ConstraintIndex
+		debug
 	end
 
     struct LinearCache

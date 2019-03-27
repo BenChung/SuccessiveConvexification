@@ -37,8 +37,12 @@ const VA=MOI.VectorAffineTerm
 const VoV=MOI.VectorOfVariables
 const SOC=MOI.SecondOrderCone
 
+# SCvx defns 
+# Lk = -1 x[1, K+1] + 1e4 * norm(nuv)
+# Jk = -1 x[1, K+1] + 1e4 * norm(x[:, i+1] - act[i+1])
+
 function build_model(prob, K, iterDynam, iterAbout, sigHat)
-	model = MosekOptimizer(MSK_IPAR_LOG=0,MSK_IPAR_INFEAS_REPORT_AUTO=1,MSK_IPAR_BI_IGNORE_MAX_ITER=1,
+	model = MosekOptimizer(#=MSK_IPAR_LOG=0,=#MSK_IPAR_INFEAS_REPORT_AUTO=1,MSK_IPAR_BI_IGNORE_MAX_ITER=1,
 				MSK_IPAR_INTPNT_MAX_ITERATIONS=10000)
 	dcs = MOI.ConstraintIndex[]
 	state_nuc = MOI.ConstraintIndex[]
@@ -63,7 +67,7 @@ function build_model(prob, K, iterDynam, iterAbout, sigHat)
 
 	#objective
 	MOI.set(model, MOI.ObjectiveFunction{MOI.ScalarAffineFunction{Float64}}(), 
-		SAF([SA(-1.0, xv[1, K+1]), SA(1.0e4, Jvnu), SA(0.5, Jtr), SA(1.0, Jsig)],0.0))
+		SAF([SA(-1.0, xv[1, K+1]), SA(prob.wNu, Jvnu), SA(0.5, Jtr), SA(1.0, Jsig)],0.0))
 	MOI.set(model, MOI.ObjectiveSense(), MOI.MIN_SENSE)
 
 	# couple the xs and us to the dxs and the dus
@@ -79,9 +83,8 @@ function build_model(prob, K, iterDynam, iterAbout, sigHat)
 
     # build the trust regions
     MOI.add_constraint(model, VoV([Jvnu; reshape(nuv, state_dim*(K+1))]), SOC(state_dim*(K+1) + 1))
-    MOI.add_constraint(model, VoV([Jtr; reshape(dxv, state_dim*(K+1));
-    	reshape(duv, control_dim*(K+1))]), SOC(1+state_dim*(K+1)+control_dim*(K+1)))
-    MOI.add_constraint(model, VoV([Jsig, dsig]), SOC(2))
+    MOI.add_constraint(model, VoV([Jtr; reshape(dxv, state_dim*(K+1)); reshape(duv, control_dim*(K+1))]), SOC(1+state_dim*(K+1)+control_dim*(K+1)))
+    MOI.add_constraint(model, VoV([Jsig; dsig]), SOC(2))
 
 	#initial and final state constraints
 	# r_1 = r_i, v_1 = v_i, omb_1 = omb_i; same for final
@@ -189,9 +192,13 @@ function build_model(prob, K, iterDynam, iterAbout, sigHat)
 	end
 
 	# state triggered constraints
-	
+	# todo 
 
-	return ProblemModel(model, xv, uv, dxv, duv, dsig, nuv, state_base, control_base, dcstrs, thrust_lb_constraint)
+	# SCvx trust region
+	rK = MOI.add_variable(model)
+	rKc = MOI.add_constraint(model, VAF([VA(1, SA(1.0, Jtr))], [-1.0]), MOI.Nonpositives(1))
+
+	return ProblemModel(model, xv, uv, dxv, duv, dsig, nuv, rK, state_base, control_base, dcstrs, thrust_lb_constraint, rKc, (Jtr, ))
 end
 
 const MOI=MathOptInterface
@@ -210,6 +217,8 @@ function solve_step(iteration::ProblemIteration, linear_cache::LinearCache)
 	duv = itermodel.duv
 	dsig = itermodel.dsv
 	nuv = itermodel.nuv
+	rk = itermodel.rk
+	dbg = itermodel.debug
 	# fix the base constraints
 
 	about = iteration.about
@@ -235,6 +244,11 @@ function solve_step(iteration::ProblemIteration, linear_cache::LinearCache)
 	ncsts = [(prob.Tmin - norm(about[n].control[1:3])) for n=1:K+1]
 	map(cstr -> MOI.modify(model, itermodel.thrust_lb_constraint, cstr), mrcs)
 	MOI.modify(model, itermodel.thrust_lb_constraint, MOI.VectorConstantChange(ncsts))
+
+	#update the trust region 
+	println("rhk $(iteration.rk)")
+	MOI.modify(model, itermodel.rkc, MOI.VectorConstantChange([-iteration.rk]))
+
 	MOI.optimize!(model);
 
 	status = MOI.get(model, MOI.TerminationStatus())
@@ -247,13 +261,44 @@ function solve_step(iteration::ProblemIteration, linear_cache::LinearCache)
 	dsr = MOI.get(model, MOI.VariablePrimal(), dsig)
 	nur = (reshape(MOI.get(model, MOI.VariablePrimal(), reshape(nuv, state_dim*(K+1))), state_dim, K+1))
 	dxvr = (reshape(MOI.get(model, MOI.VariablePrimal(), reshape(dxv, state_dim*(K+1))), state_dim, K+1))
+	Jtrr = MOI.get(model, MOI.VariablePrimal(), dbg[1])
+	println("Jtr $Jtrr")
+
+	info = ProbInfo(prob)
+	# Lk = -1 x[1, K+1] + prob.wNu * norm(nuv)
+	# Jk = -1 x[1, K+1] + prob.wNu * norm(x[:, i+1] - act[i+1])
+	jK = -1 * xr[1, K+1] + prob.wNu * norm(xr[:,k+1] - Dynamics.predict_state(xr[:,k], ur[:,k], ur[:,k+1], iteration.sigma + dsr, 1.0/(K+1), info, linear_cache) for k=1:K)
+	lK = -1 * xr[1, K+1] + prob.wNu * norm(nur)
+
+	if iteration.rk == Inf
+		next_rk = prob.ri
+	else
+		jKm = iteration.cost
+		djk = jKm - jK
+		dlk = jKm - lK
+		rhk = djk/dlk
+		if rhk < prob.rh0
+			println("reject $rhk")
+			return ProblemIteration(prob, iteration.cache, iteration.sigma, about, dynam, iteration.model, iteration.iter+1, iteration.rk/prob.alph, iteration.cost), dxvr
+		elseif rhk < prob.rh1
+			next_rk = iteration.rk/prob.alph
+			case = 1
+		elseif prob.rh1 <= rhk && rhk < prob.rh2
+			next_rk = iteration.rk
+			case = 2
+		else 
+			next_rk = prob.bet*iteration.rk
+			case = 3
+		end
+		println("nrhk $rhk case $case")
+	end
 
 	traj_points = [LinPoint(xr[:,n], ur[:,n]) for n=1:K+1]
 	#return traj_points
 	nsig = iteration.sigma + dsr 
 	linpoints = Dynamics.linearize_dynamics_symb(traj_points, iteration.sigma + dsr, linear_cache)
 	return ProblemIteration(prob, iteration.cache, iteration.sigma + dsr, traj_points, linpoints, 
-		iteration.model, iteration.iter+1, 1.0, 1.0), dxvr				
+		iteration.model, iteration.iter+1, next_rk, jK), dxvr				
 
 	#=
 	MOI.optimize!(model)

@@ -24,10 +24,10 @@ module SampleProblems
 
 	aero_info = Aerodynamics.load_aerodata("aero/lift_drag.csv")
 	base_prob = DescentProblem(g=9.82, mdry=66018, mwet=65947, Tmin=0.1*4.686588e6, Tmax=4.686588e6, jB=diagm(0=>[72487.03125,2.0734175e6,2.0734175e6]), 
-										  alpha=0.000345, rTB=[-4.26114,0,0], rFB = [2.0,0,0], rIi = [1000.0,1000.0,100.0], rIf=[0.0,0.0,0.0], vIi = [-100.0,-200.0,0], sos=352.0)
+										  alpha=0.000345, rTB=[-4.26114,0,0], rFB = [2.0,0,0], rIi = [1000.0,1000.0,100.0], rIf=[0.0,0.0,0.0], vIi = [-100.0,-200.0,0], sos=352.0, wNu = 1e4)
 	base_prob_scaled = normalize_problem(base_prob)
 
 	base_prob_aero = DescentProblem(g=9.82, mdry=66018, mwet=65947, Tmin=0.1*4.686588e6, Tmax=4.686588e6, jB=diagm(0=>[72487.03125,2.0734175e6,2.0734175e6]), 
-										  alpha=0.000345, rTB=[-4.26114,0,0], rFB = [2.0,0,0], rIi = [1000.0,1000.0,100.0], rIf=[0.0,0.0,0.0], vIi = [-100.0,-200.0,0], sos=352.0, aero = aero_info)
+										  alpha=0.000345, rTB=[-4.26114,0,0], rFB = [2.0,0,0], rIi = [1000.0,1000.0,100.0], rIf=[0.0,0.0,0.0], vIi = [-100.0,-200.0,0], sos=352.0, aero = aero_info, wNu = 1e4)
 	base_prob_aero_scaled = normalize_problem(base_prob_aero)
 end

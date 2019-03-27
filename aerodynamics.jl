@@ -7,7 +7,7 @@ using Interpolations
 using SymEngine
 using ..RocketlandDefns
 
-function load_aerodata(liftdrag::String)
+function load_aerodata(liftdrag::String, finforce::Union{String, Nothing}=nothing)
 	lddf = CSV.read(liftdrag) #numbers in newtons
 	#normalize
 	lddf[:lift_p] = lddf[:lift]
@@ -18,6 +18,11 @@ function load_aerodata(liftdrag::String)
 	lift_itrp = scale(interpolate(reshape(lddf[:lift_p],length(aoa), length(mach)), BSpline(Cubic(Line(OnGrid())))), aoa, mach)
 	drag_itrp = scale(interpolate(reshape(lddf[:drag_p],length(aoa), length(mach)), BSpline(Cubic(Line(OnGrid())))), aoa, mach)
 	trq_itrp = scale(interpolate(reshape(lddf[:torque],length(aoa), length(mach)), BSpline(Cubic(Line(OnGrid())))), aoa, mach)
+
+	if !isnothing(finforce)
+		ffdf = CSV.read(finforce)
+		
+	end
 	AtmosphericData(drag_itrp, lift_itrp, trq_itrp, 1.0, 1.0)
 end
 
