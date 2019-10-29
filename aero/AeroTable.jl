@@ -1,12 +1,14 @@
 using Interpolations
 using kRPC
 using CSV
+using LinearAlgebra
+using DataFrames
 conn = kRPCConnect("Aerodata")
 using kRPC.Remote.SpaceCenter
 totable = 1
 outp_a = 1
 outp_b = 1
-#try 
+
 vessel = ActiveVessel()
 flight = Flight(vessel)
 orbit = Orbit(vessel)
@@ -33,20 +35,83 @@ end
 guidance_frame = compute_reference_frame(body, Latitude(flight), Longitude(flight), 0.0)
 
 guidance_flight = Flight(vessel)#, referenceFrame=guidance_frame)
-
-equivalent_vel = norm([Position(vessel, body_frame)...]) * RotationalSpeed(body)
-base_vector = Float64[0, 0, -equivalent_vel]
 direction = Float64[-1,0,0]
 speed_of_sound = SpeedOfSound(flight)
 
-# v.v runs from 0 to max mach^2
-# b.v runs from -sqrt(v.v) to sqrt(v.v) NOW NORMALIZED
-
-function compute_aero_forces(mach, aoa)
+function compute_aero_forces(mach, cos_aoa)
 	velocity = mach*speed_of_sound
-	velocity_vec = broadcast(*, Float64[-cos(aoa),sin(aoa),0], velocity)
-	return kRPC.Remote.SpaceCenter.Delayed.SimulateAerodynamicForceAt(guidance_flight, body, (0.0,0.0,0.0), ((velocity_vec + base_vector)...)), velocity_vec
+	velocity_vec = broadcast(*, Float64[cos_aoa,sqrt(1-cos_aoa^2),0], velocity)
+	return kRPC.Remote.SpaceCenter.Delayed.SimulateAerodynamicForceAt(guidance_flight, body, (0.0,0.0,0.0), ((velocity_vec)...,)),
+		   kRPC.Remote.SpaceCenter.Delayed.SimulateAerodynamicTorqueAt(guidance_flight, body, (0.0,0.0,0.0), ((velocity_vec)...,)), velocity_vec
 end
+
+function sweep_aero()
+	cforce = kRPC.kPC[]
+	ctorque = kRPC.kPC[]
+	drg = Vector{Float64}[]
+	lft = Vector{Float64}[]
+	trq = Vector{Float64}[]
+	aoal = Float64[]
+	machl = Float64[]
+	for mach=0.0:0.025:1.5
+		for cos_aoa=cosd(180):1/90:cosd(0)
+			cll,ctr,bv = compute_aero_forces(mach, cos_aoa)
+			push!(cforce, cll)
+			push!(ctorque, ctr)
+			normbv = bv/norm(bv)
+			push!(drg, normbv)
+			torqd = cross(normbv, [1.0,0.0,0.0])
+			liftd = cross(torqd,normbv)
+			liftd = liftd/norm(liftd)
+			push!(lft, liftd)
+			push!(trq, torqd/norm(torqd))
+			push!(aoal, cos_aoa)
+			push!(machl, mach)
+		end
+	end
+	res = kRPC.SendMessage(conn, cforce)
+	tres = kRPC.SendMessage(conn, ctorque)
+	hcat(([aoal[i], machl[i], 
+			if !isnan(dot(res[i], drg[i])) dot(res[i], drg[i]) else 0.0 end, 
+			if !isnan(dot(res[i], lft[i])) dot(res[i], lft[i]) else 0.0 end, 
+			if !isnan(dot(tres[i], trq[i])) dot(tres[i], trq[i]) else 0.0 end] for i=1:length(res))...)
+end
+
+function compute_aero_table()
+	aero_force = sweep_aero()'
+	aero_df = DataFrame(aoa=aero_force[:,1], mach=aero_force[:,2], drag=aero_force[:,3], lift=aero_force[:,4], torque=aero_force[:,5])
+	CSV.write("lift_drag.csv", aero_df);
+end
+
+pts = Parts(vessel)
+finsOn = WithTag(pts, "nosefins2")
+fin1 = Modules(finsOn[1])[1]
+fin2 = Modules(finsOn[2])[1]
+finsOff = WithTag(pts, "nosefins")
+fin3 = Modules(finsOff[1])[1]
+fin4 = Modules(finsOff[2])[1]
+
+function compute_fin_force_table()
+	SetFieldFloat.([fin3,fin4], "Flp/Splr Dflct", convert(Float32, 0))
+	SetFieldFloat.([fin1,fin2], "Flp/Splr Dflct", convert(Float32, 0))
+	sleep(4)
+
+	function aero_profile()
+		return map(x -> [x...], kRPC.SendMessage(conn, [begin frcc,trqc,vv = compute_aero_forces(mach, 1.0); frcc end for mach=0.01:0.025:1.5]))
+	end
+	bl = aero_profile()
+	forces = Vector{Vector{Float64}}[]
+	for ang=0.0:0.1:90.0
+		SetFieldFloat.([fin1,fin2], "Flp/Splr Dflct", convert(Float32, ang))
+		sleep(0.1)
+		push!(forces, aero_profile())
+	end
+	aerod = hcat(map((force,aoa) -> vcat(hcat((force .- bl)...), transpose(collect(0.01:0.025:1.5)), fill(aoa, 1, length(bl))), forces, 0.0:0.1:90.0)...)
+	df = DataFrame(lift=aerod[2,:], drag=aerod[1,:], mach=aerod[4,:], aoa=aerod[5,:])
+	CSV.write("fin.csv", df);
+end
+
+#=
 
 function compute_aero_forces_tform(bv,vv)
 	if (vv>0)
@@ -171,9 +236,5 @@ for result in totable
 	outp_a[map_bv[result[1][1]], map_machsq[result[1][2]]] = result[2][1]
 	outp_b[map_bv[result[1][1]], map_machsq[result[1][2]]] = result[2][2]
 end
-
-
-finally
-kRPCDisconnect(conn)
-end
+=#
 =#
