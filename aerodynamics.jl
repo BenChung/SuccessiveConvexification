@@ -6,6 +6,7 @@ using StaticArrays
 using Interpolations
 using SymEngine
 using ..RocketlandDefns
+import StaticArrays
 
 function load_aerodata(liftdrag::String, finforce::Union{String, Nothing}=nothing)
 	lddf = CSV.read(liftdrag) #numbers in newtons
@@ -77,29 +78,53 @@ function aero_force(data::ExoatmosphericData, bv::AbstractArray{T} where T, vel:
 	return [0.0,0.0,0.0]
 end
 
-function direct_drag(data::AtmosphericData, cos_aoa, mach)
+function direct_drag(data::AtmosphericData, cos_aoa, mach)::Float64
 	return data.drag_itrp(cos_aoa, mach)
 end
 
-function direct_lift(data::AtmosphericData, cos_aoa, mach)
+function direct_drag(::Type{Val{:jac}}, data::AtmosphericData, cos_aoa, mach)
+	return Interpolations.gradient(data.drag_itrp, cos_aoa, mach)::StaticArrays.SArray{Tuple{2},Float64,1,2}
+end
+
+function direct_lift(data::AtmosphericData, cos_aoa::Float64, mach::Float64)::Float64
 	return data.lift_itrp(cos_aoa, mach)
 end
 
-function direct_trq(data::AtmosphericData, cos_aoa, mach)
+function direct_lift(::Type{Val{:jac}}, data::AtmosphericData, cos_aoa, mach)
+	return Interpolations.gradient(data.lift_itrp, cos_aoa, mach)::StaticArrays.SArray{Tuple{2},Float64,1,2}
+end
+
+function direct_trq(data::AtmosphericData, cos_aoa, mach)::Float64
 	return data.trq_itrp(cos_aoa, mach)
 end
 
-function direct_drag(data::ExoatmosphericData, cos_aoa, mach)
+function direct_trq(::Type{Val{:jac}}, data::AtmosphericData, cos_aoa, mach)
+	return Interpolations.gradient(data.trq_itrp, cos_aoa, mach)::StaticArrays.SArray{Tuple{2},Float64,1,2}
+end
+
+function direct_drag(data::ExoatmosphericData, cos_aoa, mach)::Float64
 	return 0.0
 end
 
-function direct_lift(data::ExoatmosphericData, cos_aoa, mach)
+function direct_lift(data::ExoatmosphericData, cos_aoa, mach)::Float64
 	return 0.0
 end
 
-function direct_trq(data::ExoatmosphericData, cos_aoa, mach)
+function direct_trq(data::ExoatmosphericData, cos_aoa, mach)::Float64
 	return 0.0
 end
 
+function direct_drag(::Type{Val{:jac}}, data::ExoatmosphericData, cos_aoa, mach)
+	return StaticArrays.SArray{Tuple{2}}(0.0,0.0)
+end
 
+function direct_lift(::Type{Val{:jac}}, data::ExoatmosphericData, cos_aoa, mach)
+	return StaticArrays.SArray{Tuple{2}}(0.0,0.0)
+end
+
+function direct_trq(::Type{Val{:jac}}, data::ExoatmosphericData, cos_aoa, mach)
+	return StaticArrays.SArray{Tuple{2}}(0.0,0.0)
+end
+
+export direct_trq, direct_lift, direct_drag
 end

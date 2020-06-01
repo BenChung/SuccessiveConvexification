@@ -3,12 +3,14 @@ using JuMP
 using ..RocketlandDefns
 using Mosek
 using MathOptInterface
-using MathOptInterfaceMosek
+using MosekTools
 using StaticArrays
 using Rotations
 import ..Dynamics
 const MOI=MathOptInterface
 
+#=
+# JuMP-based initial 3dof solver. Doesn't work as a good initalizaion, though, and written for an old JuMP versions
 function solve_initial(prob::DescentProblem)
     #computed constants
     kf = prob.K
@@ -103,6 +105,7 @@ function solve_initial(prob::DescentProblem)
 
     return initial_points,Dynamics.linearize_dynamics(initial_points, prob.tf_guess, 1.0/(N+1), ProbInfo(prob))
 end
+=#
 
 function linear_points(problem::DescentProblem)
     K = problem.K
@@ -116,7 +119,7 @@ function linear_points(problem::DescentProblem)
         qBIk = [rot.w, rot.x, rot.y, rot.z]
         TBk = [mk*problem.g,0,0]
         state_init = vcat(mk,rIk,vIk,qBIk,([0.0,0,0]))
-        control_init = [mk*problem.g,0,0,0,0]
+        control_init = [mk*problem.g,0,0]
         initial_points[k+1] = LinPoint(state_init, control_init)
     end
     return initial_points

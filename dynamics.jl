@@ -1,5 +1,6 @@
 module Dynamics
     using DifferentialEquations
+    using DiffEqSensitivity
     using ForwardDiff 
     using DiffResults
     using LinearAlgebra
@@ -57,17 +58,17 @@ module Dynamics
         aerf, bdy_trq = Aerodynamics.aero_force(info.aero,DCM(qbi) * [1.0,0.0,0.0],(@view state[5:7]),info.sos)
 
         fd1 = cross(DCM(qbi) * [0.0,1.0,0.0], state[5:7])
-        fd1 = fd1/sqrt(sum(fd1 .^ 2))
+        fd1 = fd1/sqrt(sum(fd1 .* fd1))
         fd2 = cross(fd1, state[5:7])
-        ff = u[4] * fd1 + u[5] * fd2
+        #= ff = u[4] * fd1 + u[5] * fd2 =#
 
         thr_frc = DCM(qbi) * (u[thr_idx])
-        aero_frc = aerf + ff
-        acc = (thr_frc + aero_frc)./state[mass_idx]
+        aero_frc = aerf #= + ff =#
+        acc = (thr_frc + aero_frc) ./ state[mass_idx]
         rot_vel = 0.5*Omega(omb)*qbi
-        aero_trq = cross(info.rFB, ff) + bdy_trq
+        aero_trq = #= cross(info.rFB, ff) + =# bdy_trq
         rot_acc = info.jBi*(cross(info.rTB,u[thr_idx]) + aero_trq - cross(omb,info.jB*omb))
-        return ([-info.a*sqrt(sum(u[thr_idx] .^ 2)), 
+        return ([-info.a*sqrt(sum(u[thr_idx] .* u[thr_idx])), 
                      state[5],state[6],state[7], 
                      acc[1]-info.g0, acc[2], acc[3], 
                      rot_vel[1], rot_vel[2], rot_vel[3], rot_vel[4], 
@@ -75,55 +76,44 @@ module Dynamics
     
     end
 
-    function h_stc_sym(state)
-        Va,cam = SymEngine.symbols("Va, cam")
-        vel = sqrt(sum(state[v_idx] .^ 2))
-        vdir = transpose(DCM(state[qbi_idx])) * state[v_idx]
-        return -(Va - vel) * (cam * vel + (vdir)[1])
-    end
-
     @inline function dx(output, state::AbstractArray{T} where T, u::AbstractArray{T} where T, mult, info::ProbInfo)
         output[:] = dx_static(state, u, mult, info)
         0
     end
-
-    macro genIdx(start,last)
-        #return :(@SVector [i for i=$start:$last])
-    end
-    const stateC = 1:14 # @genIdx(1,14)
-    const ukC = 15:19 # @genIdx(15,17)
-    const upC = 20:24 # @genIdx(18,20)
-    const sigmaC = 25
-
-    function make_dyn(dt,pinfo)
-        @inline function dynamics_sim(ipm, state, p, t)
-            lkm = (dt-t)/dt
-            lkp = t/dt
-            dx(ipm, state + p[stateC], p[ukC]*lkm + p[upC]*lkp, p[sigmaC], pinfo)
-        end
-        return dynamics_sim
-    end
-
-    struct StateInfo
-        controlK::Vector{Float64}
-        controlKp::Vector{Float64}
-        sigma::Float64
-        dt::Float64
-        pinfo::ProbInfo
-    end
     
-    function control_dx(ipm, state, p, t)
-        dt = p.dt
-        lkm = (dt-t)/dt
-        lkp = t/dt
-        dx(ipm, state, p.controlK*lkm + p.controlKp*lkp, p.sigma, p.pinfo)
+    @inline function current_control(pc, start_ctrl::AbstractArray{T} where T, ed_ctrl::AbstractArray{T} where T)
+        return (1.0-pc) * start_ctrl + pc * ed_ctrl
     end
 
-    function linearize_segment(int,dt)
-        sol = DifferentialEquations.solve!(int)
-        x,dp = extract_local_sensitivities(int.sol,dt)
-        return LinRes(x,hcat(dp...) + hcat(Matrix(1.0I, 14, 14), zeros(14,7)))
+    function rk4(inp::Vector{T}, dt, info) where T 
+        state = (@view inp[1:14] )
+        start_ctrl = (@view inp[15:17])
+        ed_ctrl = (@view inp[18:20])
+        i_sigma = inp[21]*dt
+        npts = 1
+        idt = i_sigma/npts
+        pcs = 1.0/npts
+        ct = 0.0
+        pca = 0.0
+        for i=0:npts
+            ict = current_control(pca, start_ctrl, ed_ctrl)
+            mct = current_control(pca + pcs/2, start_ctrl, ed_ctrl)
+            ect = current_control(pca + pcs, start_ctrl, ed_ctrl)
+            k1 = dx_static(state, ict, idt, info)
+            k2 = dx_static(state + k1./2, mct, idt, info)
+            k3 = dx_static(state + k2./2, mct, idt, info)
+            k4 = dx_static(state + k3, ect, idt, info)
+            ct += idt
+            pca += pcs
+            state += k1./6 + k2./3 + k3./3 + k4./6
+        end
+        return state
     end
+
+    const stateC = 1:14
+    const ukC = 15:17
+    const upC = 18:20
+    const sigmaC = 21
 
     function make_dynamics_module(info::ProbInfo)
         t=SymEngine.symbols("t")
@@ -132,48 +122,54 @@ module Dynamics
         lkp = t/dt
 
         #sig: dx(J, inp, dt, pinfo, t)
-        dx_fun = SymbolicUtils.make_simplified(:dx, st -> dx_static(st[stateC], st[ukC]*lkm + st[upC]*lkp, st[sigmaC], info), 25)
-        h_fun = SymbolicUtils.make_simplified(:h, st -> h_stc_sym(st), 14)
-        hx_fun = SymbolicUtils.make_jacobian(:dh, st -> h_stc_sym(st), 14, [], [])
+        dx_fun = SymbolicUtils.make_simplified(:dx, st -> dx_static(st[stateC], st[ukC]*lkm + st[upC]*lkp, st[sigmaC], info), 21)
+        ddx_fun = SymbolicUtils.make_jacobian(:ddx, st -> dx_static(st[stateC], st[ukC]*lkm + st[upC]*lkp, st[sigmaC], info), 21)
+        #J_fun = SymbolicUtils.make_jacobian(:jac, st -> rk4(st, 1.0, info), 21)
         genmod = quote
             module Linearizer
                 using LinearAlgebra
-                using DifferentialEquations
                 using ForwardDiff
-                import DiffResults
+                import StaticArrays
                 using ..RocketlandDefns
-                import ..Aerodynamics
+                using ..Aerodynamics
 
-                mutable struct IntegratorCache
-                    prim_integrator::Any
-                    dual_integrator::Any
+
+                # all of these are called by the generated code
+                function clamp_aoa(cos_aoa::T, mach::T,p::ProbInfo) where T
+                    int_aoa = zero(T)
+                    if mach > zero(T)
+                        int_aoa = clamp(cos_aoa/(mach*p.sos),-1.0,1.0)
+                    end
+                    return int_aoa
                 end
 
                 function drag(cos_aoa::T,mach::T,p::ProbInfo) where T
-                    int_aoa = zero(T)
-                    if mach > zero(T)
-                        int_aoa = clamp(cos_aoa/(mach*p.sos),-1.0,1.0)
-                    end
-                    dragf = Aerodynamics.direct_drag(p.aero,int_aoa,mach)::T
+                    int_aoa = clamp_aoa(cos_aoa, mach, p)
+                    dragf = direct_drag(p.aero,int_aoa,mach)::T
                     return dragf
                 end
+                function drag(::Type{Val{:jac}}, cos_aoa::T,mach::T, p::ProbInfo) where T
+                    int_aoa = clamp_aoa(cos_aoa, mach, p)
+                    return direct_drag(Val{:jac}, p.aero, int_aoa, mach)
+                end
+
                 function lift(cos_aoa::T,mach::T,p::ProbInfo) where T
-                    int_aoa = zero(T)
-                    if mach > zero(T)
-                        int_aoa = clamp(cos_aoa/(mach*p.sos),-1.0,1.0)
-                    end
-                    return Aerodynamics.direct_lift(p.aero,int_aoa,mach)::T
+                    int_aoa = clamp_aoa(cos_aoa, mach, p)
+                    return direct_lift(p.aero,int_aoa,mach)::T
                 end
+                function lift(::Type{Val{:jac}}, cos_aoa::T,mach::T,p::ProbInfo) where T
+                    int_aoa = clamp_aoa(cos_aoa, mach, p)
+                    return direct_lift(Val{:jac}, p.aero, int_aoa, mach)
+                end
+
                 function trq(cos_aoa::T,mach::T,p::ProbInfo) where T
-                    int_aoa = zero(T)
-                    if mach > zero(T)
-                        int_aoa = clamp(cos_aoa/(mach*p.sos),-1.0,1.0)
-                    end
-                    return Aerodynamics.direct_trq(p.aero,int_aoa,mach)::T
+                    int_aoa = clamp_aoa(cos_aoa, mach, p)
+                    return direct_trq(p.aero,int_aoa,mach)::T
                 end
-                $dx_fun
-                $h_fun
-                $hx_fun
+                function trq(::Type{Val{:jac}}, cos_aoa::T,mach::T,p::ProbInfo) where T
+                    int_aoa = clamp_aoa(cos_aoa, mach, p)
+                    return direct_trq(Val{:jac}, p.aero, int_aoa, mach)
+                end
 
                 @inline function ifnz(val::T, nz::V) where {T,V}
                     if !iszero(val)
@@ -182,169 +178,119 @@ module Dynamics
                         return zero(V)
                     end
                 end
-
-                @inline function dx_integrator(du,u,p,t)
-                    fill!(du, zero(eltype(du)))
-                    res = dx(du, u, p[1], p[2], t)
-                    return 0.0
-                end
-                const stateC = 1:14 # @genIdx(1,14)
-                const ukC = 15:17 # @genIdx(15,17)
-                const upC = 18:20 # @genIdx(18,20)
-                const sigmaC = 21
-                function simulate(outp, inp::Vector{T}, dt::Float64, info::ProbInfo, cache::IntegratorCache) where T <: AbstractFloat
-                    if isnothing(cache.prim_integrator)
-                        params = [dt,info]
-                        prob = ODEProblem(dx_integrator, inp, convert.(eltype(inp), (0.0,dt)), params)
-                        cache.prim_integrator = (init(prob, BS3(), abstol=1e-2, reltol=1e-2, save_everystep=false), params)
-                    else
-                        integrator,params = cache.prim_integrator
-                        reinit!(integrator, inp, 
-                            t0 = convert(eltype(inp), 0.0), tf = convert(eltype(inp), dt), reset_dt = false)
-                    end
-
-                    sol = solve!(cache.prim_integrator[1])
-                    outp .= sol[end][1:14]
+                @inline function ifnz(::Type{Val{:jac}}, val::T, nz::V) where {T,V}
+                    return StaticArrays.SArray{Tuple{2}}(0.0,1.0) # blunt approximation
                 end
 
-                function simulate(outp, inp::Vector{T}, dt::Float64, info::ProbInfo, cache::IntegratorCache) where T <: ForwardDiff.Dual
-                    if isnothing(cache.dual_integrator)
-                        params = [dt,info]
-                        prob = ODEProblem(dx_integrator, inp, convert.(eltype(inp), (0.0,dt)), params)
-                        cache.dual_integrator = (init(prob, BS3(), abstol=1e-2, reltol=1e-2, save_everystep=false), params)
-                    else
-                        integrator,params = cache.dual_integrator
-                        reinit!(integrator, inp, 
-                            t0 = convert(eltype(inp), 0.0), tf = convert(eltype(inp), dt), reset_dt = false)
-                    end
-
-                    sol = solve!(cache.dual_integrator[1])
-                    outp .= sol[end][1:14]
-                end
-
-                function allocate_config()
-                    cfg = ForwardDiff.JacobianConfig(nothing, zeros(14), zeros(25))
-                    return cfg
-                end
-
-                function sensitivity(res, inp::Vector{Float64}, dt::Float64, info::ProbInfo, cache::IntegratorCache, cfg) 
-                    outp = zeros(14)
-                    ForwardDiff.jacobian!(res, (y,x) -> begin simulate(y, x, dt, info, cache) end, outp, inp, cfg)
-                end
+                $dx_fun
+                $ddx_fun
             end
         end
         Main.eval(genmod.args[2])
     end
 
-    function make_state(a::LinPoint, b::LinPoint, sig::Float64)
-        return vcat(a.state, a.control, b.control, sig)
+    struct DxIntegrator{T,V,X} <: Function 
+        temp_state::T
+        dt::Float64
+        info::ProbInfo{V}
+        dx::X
+    end
+    @inline function (ff::DxIntegrator)(du,u,p::Vector{Float64},t::Float64)
+        fill!(du, zero(eltype(du)))
+        ff.temp_state .= u .+ p
+        res = ff.dx(du, ff.temp_state, ff.dt, ff.info, t)
+        return nothing
     end
 
-    function linearize_dynamics(states::Array{LinPoint,1}, sigma_lin::Float64, dt::Float64, info::ProbInfo)
-        results = Array{LinRes,1}(undef, length(states)-1)
-        fun = make_dyn(dt,info)
-
-        cstate = states[1]
-        nstate = states[2]
-        ip = vcat(zeros(14), cstate.control, nstate.control, sigma_lin)
-        prob = ODELocalSensitivityProblem(fun, vcat(cstate.state, Float64[]), (0.0,dt), ip)
-        integrator = init(prob, Vern9(),abstol=1e-14,reltol=1e-14, save_everystep=false, force_dtmin = true)
-
-        for i=1:length(states)-1
-            cstate = states[i]
-            nstate = states[i+1]
-            ip[:] .= vcat(zeros(14), cstate.control, nstate.control, sigma_lin)
-            reinit!(integrator, vcat(cstate.state, zeros(294)), t0=0.0, tf=dt)
-            results[i] = linearize_segment(integrator,dt)
+    @inline function ddx_integrator(J,u,p,t, dt, info, ddx)
+        fill!(J, zero(eltype(J)))
+        for i=1:21
+            J[i,i] = 1.0
         end
-        return results
+        return nothing
     end
 
-    @inline function current_control(pc, start_ctrl::AbstractArray{T} where T, ed_ctrl::AbstractArray{T} where T)
-        return (1.0-pc) * start_ctrl + pc * ed_ctrl
+    struct ParamJac{T,F} <: Function
+        temp_state :: Vector{Float64}
+        dt::Float64
+        info::ProbInfo{T}
+        ddx::F
     end
-    function rk4_seg_dyn(dt::Float64, info::ProbInfo)
-        function inner(outp::Vector{T}, inp::Vector{T}) where T 
-            state = (@view inp[1:14] )
-            start_ctrl = (@view inp[15:17])
-            ed_ctrl = (@view inp[18:20])
-            i_sigma = inp[21]*dt
-            npts = 40
-            idt = i_sigma/npts
-            pcs = 1.0/npts
-            ct = 0.0
-            pca = 0.0
-            for i=0:npts
-                ict = current_control(pca, start_ctrl, ed_ctrl)
-                mct = current_control(pca + pcs/2, start_ctrl, ed_ctrl)
-                ect = current_control(pca + pcs, start_ctrl, ed_ctrl)
-                k1 = dx_static(state, ict, idt, info)
-                k2 = dx_static(state + k1./2, mct, idt, info)
-                k3 = dx_static(state + k2./2, mct, idt, info)
-                k4 = dx_static(state + k3, ect, idt, info)
-                ct += idt
-                pca += pcs
-                state += k1./6 + k2./3 + k3./3 + k4./6
-            end
-            outp[:] = state
+    @inline function (ff::ParamJac)(pJ::Matrix{Float64}, u, p::Vector{Float64}, t::Float64)
+        fill!(pJ, zero(eltype(pJ)))
+        ff.temp_state .= u .+ p
+        res = ff.ddx(pJ, ff.temp_state, ff.dt, ff.info, t)
+        return nothing
+    end
+
+    mutable struct IntegratorCache
+        sim_prob::Any
+        sense_prob::Any
+        sim_int::Any 
+        sense_int::Any
+        params::Any
+        info::ProbInfo
+        function IntegratorCache(prob::DescentProblem, info::ProbInfo, lin_mod)
+            return IntegratorCache([prob.mwet; prob.rIi; prob.vIi; prob.qBIi; prob.wBi; 1.0; 0.0; 0.0; 1.0; 0.0; 0.0; 1.0], 1/(prob.K+1), info, lin_mod)
         end
-        return inner
-    end
-
-    function linearize_dynamics_rk4(states::Array{LinPoint,1}, sigma_lin::Float64, dt::Float64, info::ProbInfo)
-        results = Array{LinRes,1}(undef, length(states)-1)
-        rk4fun = rk4_seg_dyn(dt, info)
-
-        exout = Array{Float64}(undef, 14)
-        exin = Array{Float64}(undef, 21)
-        res = DiffResults.JacobianResult(exout, exin)
-        config = ForwardDiff.JacobianConfig(rk4fun, exout, exin)
-        for i=1:length(states)-1
-            cstate = states[i]
-            nstate = states[i+1]
-            rk4ps = Array{Float64}(undef, 14)
-            inp = vcat(cstate.state, cstate.control, nstate.control, sigma_lin)
-            ForwardDiff.jacobian!(res, rk4fun, rk4ps, inp, config)
-            results[i] = LinRes(DiffResults.value(res),DiffResults.jacobian(res))
+        function IntegratorCache(inp::Vector{Float64}, dt::Float64, info::ProbInfo, lin_mod)
+            params = [dt,info]
+            dxfun = lin_mod.dx 
+            ddxfun = lin_mod.ddx
+            dx_int = DxIntegrator(zeros(21), params[1], params[2], dxfun)
+            pj_int = ParamJac(zeros(21), params[1], params[2], ddxfun)
+            fun = ODEFunction(
+                dx_int; 
+                jac=(J,u,p,t) -> ddx_integrator(J,u,p,t,params[1],params[2],ddxfun), 
+                paramjac=pj_int)
+            sim_prob = ODEProblem(fun, 
+                zeros(21), convert.(eltype(inp), (0.0,dt)), 
+                inp, 
+                autodiff=false,
+                autojacvec=false)
+            sim_int = init(sim_prob, BS3(), abstol=1e-2, reltol=1e-2, save_everystep=false, save_start=false)
+            sense_prob = ODEForwardSensitivityProblem(fun, 
+                zeros(21), convert.(eltype(inp), (0.0,dt)), 
+                inp, 
+                ForwardSensitivity(autojacvec=false);
+                autodiff=false,
+                autojacvec=false)
+            sense_int = init(sense_prob, BS3(), abstol=1e-2, reltol=1e-2, save_everystep=false, save_start=false)
+            new(sim_prob, sense_prob, sim_int, sense_int, params, info)
         end
-        return results
     end
 
-    function initalize_cache(prob::DescentProblem)
-        return initalize_linearizer(ProbInfo(prob), 1/(prob.K+1))
+    function simulate(res, inp::Vector{Float64}, dt::Float64, cache::IntegratorCache)
+        fill!(cache.sim_int.u, 0.0)
+        reinit!(cache.sim_int, inp, t0 = convert(eltype(inp), 0.0), tf = convert(eltype(inp), dt), reset_dt=true)
+        cache.params[1] = dt 
+        solve!(cache.sim_int)
     end
 
-    function initalize_linearizer(prob::ProbInfo, base_dt::Float64)
-        lin_mod = Dynamics.make_dynamics_module(prob)
-        cache = Base.invokelatest(lin_mod.IntegratorCache, nothing, nothing)
-        cfg = Base.invokelatest(lin_mod.allocate_config)
-        return LinearCache(cfg, cache, prob, base_dt, lin_mod)
+    function sensitivity(res, inp::Vector{Float64}, dt::Float64, cache::IntegratorCache)
+        fill!(cache.sense_int.u, 0.0)
+        reinit!(cache.sense_int, inp, t0 = convert(eltype(inp), 0.0), tf = convert(eltype(inp), dt), reset_dt=true)
+        cache.params[1] = dt 
+        solve!(cache.sense_int)
+        return extract_local_sensitivities(cache.sense_int.sol, 1, Val(true))
     end
-
 
     function predict_state(initial_state, uk, up, sigma, dt, pinfo, cache)
         res = Array{Float64}(undef, 14)
-        Base.invokelatest(cache.lin_mod.simulate, res, [initial_state; uk; up; sigma], dt, pinfo, cache.cache)
+        simulate(res, [initial_state; uk; up; sigma], dt, cache.cache)
         return res
     end
 
-    function linearize_dynamics_symb(states::Array{LinPoint,1}, tf_guesses::Tuple{Varargs{Float64, N}}, splits::Tuple{Varargs{Int, K}}, cache::LinearCache) where {N,K}
+    function linearize_dynamics_symb(states::Array{LinPoint,1}, tf_guess::Float64, base_dt::Float64, cache::IntegratorCache) where {N,K}
         results = Array{LinRes,1}(undef, length(states)-1)
         exout = Array{Float64}(undef, 14)
         exin = Array{Float64}(undef, 25)
         res = DiffResults.JacobianResult(exout, exin)
 
-        c_split = 1
-        c_tf = tf_guesses[c_split]
         for i=1:length(states)-1
-            if i > splits[c_split] 
-                c_split += 1
-                c_tf = tf_guesses[c_split]
-            end
-            ist = make_state(states[i], states[i+1], tf_guesses)
-            Base.invokelatest(cache.lin_mod.sensitivity, res, ist,
-                cache.base_dt, cache.probinfo, cache.cache, cache.cfg)
-            results[i] = LinRes(copy(DiffResults.value(res)), copy(DiffResults.jacobian(res)))
+            ist = make_state(states[i], states[i+1], tf_guess)
+            val, mat = sensitivity(res, ist, base_dt, cache.probinfo, cache)
+            results[i] = LinRes(copy(val), copy(mat))
         end
         return results
     end

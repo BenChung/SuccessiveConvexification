@@ -1,7 +1,7 @@
 module Rocketland
 using Mosek
 using MathOptInterface
-using MathOptInterfaceMosek
+using MosekTools
 using Rotations
 using StaticArrays
 using LinearAlgebra

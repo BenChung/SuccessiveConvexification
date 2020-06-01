@@ -30,12 +30,11 @@ function _convert_deriv(ex::Basic, derivs::Dict{Deriv, Symbol}, substs::Dict{Sym
 	fnd = Symbol(get_fnsym_name(call))
 	fnargs = SymEngine.get_args(call)
 	argo = Dict{Symbol, Int64}(map(p->(Symbol(p[2]),p[1]), enumerate(fnargs)))
-
 	sig = [argo[Symbol(var)] for var in args[2:end]]
 	key = Deriv(fnd, sig)
-	dfun = derivs[key]
+	#dfun = derivs[key]
 
-	return Expr(:call, dfun, [_convert_diff(a, derivs, substs) for a in fnargs]...)
+	return Expr(:ref, Expr(:call, fnd, Val{:jac}, [_convert_diff(a, derivs, substs) for a in fnargs]...), sig[1])
 end
 
 SymEngine.N(b::SymEngine.BasicType{Val{:Integer}}) = convert(Float64, convert(BigInt, b))
@@ -135,7 +134,7 @@ function make_simplified(name, fun, nargs; postprocess = nothing, expected_args 
 	elseif exprs isa Array{T, 2} where T
 		bargs = reshape(body.args[end].args, size(exprs))
 		assignment = vcat([[:(J[$rown, $coln] = $(bargs[rown, coln]))
-				for (rown, cell) in enumerate(col)] 
+				for (rown, cell) in enumerate(col) if bargs[rown, coln] != 0.0] 
 				for (coln, col) in enumerate(eachcol(exprs))]...)
 	else 
 		assignment = Expr[:(return $(body.args[end].args...))]
@@ -154,7 +153,7 @@ function make_simplified(name, fun, nargs; postprocess = nothing, expected_args 
 	end
 end
 
-function make_jacobian(fnname, fun, nargs, idfs, ivects)
+function make_jacobian(fnname, fun, nargs)
 	#=
 	dfs = Dict{Deriv,Symbol}(
 		[Deriv(c.args[2].args[1], [c.args[2].args[2:end]...]) => c.args[3] for c in idfs.args])

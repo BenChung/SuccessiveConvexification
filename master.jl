@@ -2,18 +2,19 @@ module RocketlandDefns
 	using StaticArrays
 	using Interpolations
 	using MathOptInterface
+	using LinearAlgebra
 	abstract type AerodynamicInfo end
 
 	struct ExoatmosphericData <: AerodynamicInfo end
 
-	struct AtmosphericData <: AerodynamicInfo
-		drag_itrp :: Interpolations.ScaledInterpolation{Float64, 2, T, U, V} where {T, U, V}
-		lift_itrp :: Interpolations.ScaledInterpolation{Float64, 2, T, U, V} where {T, U, V}
-		trq_itrp :: Interpolations.ScaledInterpolation{Float64, 2, T, U, V} where {T, U, V}
+	struct AtmosphericData{T <: Interpolations.ScaledInterpolation{Float64, 2, X, U, V} where {X, U, V}} <: AerodynamicInfo
+		drag_itrp :: T
+		lift_itrp :: T
+		trq_itrp :: T
 		force_scalar :: Float64
 		length_scalar :: Float64
 	end
-	struct DescentProblem
+	struct DescentProblem{T<:AerodynamicInfo}
 	    g::Float64
 	    mdry::Float64
 	    mwet::Float64
@@ -41,7 +42,7 @@ module RocketlandDefns
 	    wBi::Array{Float64,1}
 	    wBf::Array{Float64,1}
 
-	    aero::AerodynamicInfo
+	    aero::T
 
 	    K::Int64
 	    imax::Int64
@@ -65,11 +66,11 @@ module RocketlandDefns
 	                    jB=diagm(0=>[1e-2,1e-2,1e-2]), alpha=0.01, rho=1.225,rTB=[-1e-2,0,0],rFB=[1e-2,0,0],rIi=[4.0,4.0,0.0],rIf=[0.0,0.0,0.0],
 	                    vIi=[0,-2,2],vIf=[-0.1,0.0,0.0],qBIi=[1.0,0,0,0],qBIf=[1.0,0,0,0],wBi=[0.0,0.0,0.0], aero = ExoatmosphericData(),
 	                    wBf=[0.0,0,0],K=50,imax=15,wNu=1e5,wID=1e-3, wDS=1e-1, wCst=10.0, wTviol=100.0, nuTol=1e-10, delTol = 1e-3, tf_guess=1.0, ri=1.0, rh0=0.0, rh1=0.25, rh2=0.90, alph=2.0, bet=3.2, sos=5.0) =
-	        new(g,mdry,mwet,Tmin,Tmax,deltaMax,thetaMax,gammaGs,omMax,dpMax,jB,alpha,rho,sos,rTB,rFB,rIi,rIf,vIi,vIf,
+	        new{typeof(aero)}(g,mdry,mwet,Tmin,Tmax,deltaMax,thetaMax,gammaGs,omMax,dpMax,jB,alpha,rho,sos,rTB,rFB,rIi,rIf,vIi,vIf,
 	            qBIi,qBIf,wBi,wBf,aero,K,imax,wNu,wID,wDS,wCst,wTviol,nuTol,delTol,tf_guess,ri,rh0,rh1,rh2, alph, bet)
 	end
 
-	struct ProbInfo
+	struct ProbInfo{T<:AerodynamicInfo}
 	    a::Float64
 	    g0::Float64
 	    sos::Float64
@@ -77,8 +78,8 @@ module RocketlandDefns
 	    jBi::SArray{Tuple{3,3},Float64,2,9}
 	    rTB::SArray{Tuple{3}, Float64, 1, 3}
 	    rFB::SArray{Tuple{3}, Float64, 1, 3}
-	    aero::AerodynamicInfo
-	    ProbInfo(from::DescentProblem) = new(from.alpha, from.g, from.sos, SMatrix{3,3}(from.jB), SMatrix{3,3}(inv(from.jB)), SVector{3}(from.rTB), SVector{3}(from.rFB), from.aero)
+	    aero::T
+	    ProbInfo(from::DescentProblem{T}) where T = new{T}(from.alpha, from.g, from.sos, SMatrix{3,3}(from.jB), SMatrix{3,3}(inv(from.jB)), SVector{3}(from.rTB), SVector{3}(from.rFB), from.aero)
 	end
 
 	struct LinPoint
