@@ -3,12 +3,13 @@ using JuMP
 using ..RocketlandDefns
 using Mosek
 using MathOptInterface
-using MathOptInterfaceMosek
+using Mosek
 using StaticArrays
 using Rotations
 import ..Dynamics
 const MOI=MathOptInterface
 
+#=
 function solve_initial(prob::DescentProblem)
     #computed constants
     kf = prob.K
@@ -103,6 +104,7 @@ function solve_initial(prob::DescentProblem)
 
     return initial_points,Dynamics.linearize_dynamics(initial_points, prob.tf_guess, 1.0/(N+1), ProbInfo(prob))
 end
+=#
 
 function linear_points(problem::DescentProblem)
     K = problem.K

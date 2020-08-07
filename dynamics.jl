@@ -328,20 +328,14 @@ module Dynamics
         return res
     end
 
-    function linearize_dynamics_symb(states::Array{LinPoint,1}, tf_guesses::Tuple{Varargs{Float64, N}}, splits::Tuple{Varargs{Int, K}}, cache::LinearCache) where {N,K}
+    function linearize_dynamics_symb(states::Array{LinPoint,1}, tf_guess::Float64, cache::LinearCache) where {N,K}
         results = Array{LinRes,1}(undef, length(states)-1)
         exout = Array{Float64}(undef, 14)
         exin = Array{Float64}(undef, 25)
         res = DiffResults.JacobianResult(exout, exin)
 
-        c_split = 1
-        c_tf = tf_guesses[c_split]
         for i=1:length(states)-1
-            if i > splits[c_split] 
-                c_split += 1
-                c_tf = tf_guesses[c_split]
-            end
-            ist = make_state(states[i], states[i+1], tf_guesses)
+            ist = make_state(states[i], states[i+1], tf_guess)
             Base.invokelatest(cache.lin_mod.sensitivity, res, ist,
                 cache.base_dt, cache.probinfo, cache.cache, cache.cfg)
             results[i] = LinRes(copy(DiffResults.value(res)), copy(DiffResults.jacobian(res)))

@@ -1,7 +1,8 @@
 module Rocketland
 using Mosek
 using MathOptInterface
-using MathOptInterfaceMosek
+using Mosek
+using MosekTools
 using Rotations
 using StaticArrays
 using LinearAlgebra
@@ -26,7 +27,7 @@ function create_initial(problem::DescentProblem, linear_cache::LinearCache)
     K = problem.K
     initial_points,linpoints = FirstRound.linear_initial(problem, linear_cache)
     model = build_model(problem, K, linpoints, initial_points, problem.tf_guess)
-    return ProblemIteration(problem, linear_cache, problem.tf_guess, initial_points, linpoints, model, 0, Inf, Inf)
+    return ProblemIteration(problem, linear_cache, problem.tf_guess, initial_points, linpoints, model, 0, 100.0, Inf)
 end
 
 const MOI=MathOptInterface
@@ -42,8 +43,8 @@ const SOC=MOI.SecondOrderCone
 # Jk = -1 x[1, K+1] + 1e4 * norm(x[:, i+1] - act[i+1])
 
 function build_model(prob, K, iterDynam, iterAbout, sigHat)
-	model = MosekOptimizer(#=MSK_IPAR_LOG=0,=#MSK_IPAR_INFEAS_REPORT_AUTO=1,MSK_IPAR_BI_IGNORE_MAX_ITER=1,
-				MSK_IPAR_INTPNT_MAX_ITERATIONS=10000)
+	model = MOI.instantiate(() -> Mosek.Optimizer(#=MSK_IPAR_LOG=0,=#MSK_IPAR_INFEAS_REPORT_AUTO=1,MSK_IPAR_BI_IGNORE_MAX_ITER=1,
+				MSK_IPAR_INTPNT_MAX_ITERATIONS=10000); with_bridge_type=Float64)
 	dcs = MOI.ConstraintIndex[]
 	state_nuc = MOI.ConstraintIndex[]
 
@@ -298,7 +299,7 @@ function solve_step(iteration::ProblemIteration, linear_cache::LinearCache)
 	nsig = iteration.sigma + dsr 
 	linpoints = Dynamics.linearize_dynamics_symb(traj_points, iteration.sigma + dsr, linear_cache)
 	return ProblemIteration(prob, iteration.cache, iteration.sigma + dsr, traj_points, linpoints, 
-		iteration.model, iteration.iter+1, next_rk, jK), dxvr				
+		iteration.model, iteration.iter+1, next_rk, jK), nur				
 
 	#=
 	MOI.optimize!(model)
