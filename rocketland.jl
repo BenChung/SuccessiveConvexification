@@ -280,7 +280,7 @@ function solve_step(iteration::ProblemIteration, linear_cache::LinearCache)
 		rhk = djk/dlk
 		if rhk < prob.rh0
 			println("reject $rhk")
-			return ProblemIteration(prob, iteration.cache, iteration.sigma, about, dynam, iteration.model, iteration.iter+1, iteration.rk/prob.alph, iteration.cost), dxvr
+			return ProblemIteration(prob, iteration.cache, iteration.sigma, about, dynam, iteration.model, iteration.iter+1, iteration.rk/prob.alph, iteration.cost), norm(nur), Inf
 		elseif rhk < prob.rh1
 			next_rk = iteration.rk/prob.alph
 			case = 1
@@ -299,7 +299,7 @@ function solve_step(iteration::ProblemIteration, linear_cache::LinearCache)
 	nsig = iteration.sigma + dsr 
 	linpoints = Dynamics.linearize_dynamics_symb(traj_points, iteration.sigma + dsr, linear_cache)
 	return ProblemIteration(prob, iteration.cache, iteration.sigma + dsr, traj_points, linpoints, 
-		iteration.model, iteration.iter+1, next_rk, jK), nur				
+		iteration.model, iteration.iter+1, next_rk, jK), norm(nur), djk				
 
 	#=
 	MOI.optimize!(model)
@@ -411,17 +411,24 @@ function run_iters(iprob::DescentProblem, niters::Int)
 	return trjs, tfs
 end
 
-function solve_problem(iprob::DescentProblem)
-    prob = create_initial(iprob)
+function solve_problem(iprob::DescentProblem, cache::LinearCache)
+    prob = create_initial(iprob, cache)
     cnu = Inf
     cdel = Inf
     iter = 1
     while (iprob.nuTol < cnu || iprob.delTol < cdel) && iter < iprob.imax
         println(cnu, "|", cdel, "|", iprob.nuTol < cnu, "|", iprob.delTol < cdel)
-        prob,cnu,cdel = solve_step(prob)
+        prob,cnu,cdel = solve_step(prob, cache)
         iter = iter+1
     end
     return prob,cnu,cdel
+end
+
+function solve_problem(iprob::DescentProblem)
+	return eval(quote
+			lc = Dynamics.initalize_cache($iprob);
+			Rocketland.solve_problem($iprob, lc)
+		end)
 end
 
 using Plots
