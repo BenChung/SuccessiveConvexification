@@ -10,7 +10,10 @@ import ..Dynamics
 const MOI=MathOptInterface
 
 #=
+<<<<<<< HEAD
 # JuMP-based initial 3dof solver. Doesn't work as a good initalizaion, though, and written for an old JuMP versions
+=======
+>>>>>>> 6d18d726748568198fe41d32ebcf2420ce96670c
 function solve_initial(prob::DescentProblem)
     #computed constants
     kf = prob.K
