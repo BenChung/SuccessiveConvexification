@@ -7,7 +7,7 @@ module RocketlandDefns
 
 	struct ExoatmosphericData <: AerodynamicInfo end
 
-	struct AtmosphericData{T <: Interpolations.ScaledInterpolation{Float64, 2, X, U, V} where {X, U, V}} <: AerodynamicInfo
+	struct AtmosphericData{T} <: AerodynamicInfo
 		drag_itrp :: T
 		lift_itrp :: T
 		trq_itrp :: T
@@ -110,17 +110,18 @@ module RocketlandDefns
 		debug
 	end
 
-    struct LinearCache
-        cfg
-        cache :: Any # don't know until inner module is generated
-        probinfo :: ProbInfo
-        base_dt :: Float64
-        lin_mod
+    mutable struct IntegratorCache
+        sim_prob::Any
+        sense_prob::Any
+        sim_int::Any 
+        sense_int::Any
+        params::Any
+        info::ProbInfo
     end
 
 	struct ProblemIteration
 		problem::DescentProblem
-		cache::LinearCache
+		cache::IntegratorCache
 		sigma::Float64
 
 		about::Array{LinPoint,1}
@@ -131,7 +132,7 @@ module RocketlandDefns
 		rk::Float64
 		cost::Float64
 	end
-	export DescentProblem, ProbInfo, LinPoint, LinRes, ProblemIteration, ProblemModel, AerodynamicInfo, AtmosphericData, ExoatmosphericData, LinearCache
+	export DescentProblem, ProbInfo, LinPoint, LinRes, ProblemIteration, ProblemModel, AerodynamicInfo, AtmosphericData, ExoatmosphericData, IntegratorCache
 end
 include("aerodynamics.jl")
 include("symbolic_diff.jl")

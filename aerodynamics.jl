@@ -16,9 +16,9 @@ function load_aerodata(liftdrag::String, finforce::Union{String, Nothing}=nothin
 	#mach, aoa
 	mach=0.0:0.025:1.5
 	aoa=cosd(180):1/90:cosd(0)
-	lift_itrp = scale(interpolate(reshape(lddf[:lift_p],length(aoa), length(mach)), BSpline(Cubic(Line(OnGrid())))), aoa, mach)
-	drag_itrp = scale(interpolate(reshape(lddf[:drag_p],length(aoa), length(mach)), BSpline(Cubic(Line(OnGrid())))), aoa, mach)
-	trq_itrp = scale(interpolate(reshape(lddf[:torque],length(aoa), length(mach)), BSpline(Cubic(Line(OnGrid())))), aoa, mach)
+	lift_itrp = extrapolate(scale(interpolate(reshape(lddf[:lift_p],length(aoa), length(mach)), BSpline(Cubic(Line(OnGrid())))), aoa, mach), Flat())
+	drag_itrp = extrapolate(scale(interpolate(reshape(lddf[:drag_p],length(aoa), length(mach)), BSpline(Cubic(Line(OnGrid())))), aoa, mach), Flat())
+	trq_itrp = extrapolate(scale(interpolate(reshape(lddf[:torque],length(aoa), length(mach)), BSpline(Cubic(Line(OnGrid())))), aoa, mach), Flat())
 
 	if !isnothing(finforce)
 		ffdf = CSV.read(finforce)
@@ -42,7 +42,7 @@ function aero_force(data::AtmosphericData, bv::AbstractArray{T}, vel::AbstractAr
 	if abs(dp) >= 0.95
 		drag = data.drag_itrp(cos_aoa,mach)::T*data.force_scalar
 		dragf = drag*vel/norm(vel)
-		return dragf
+		return dragf, zeros(T, 3)
 	else
 		drag = data.drag_itrp(cos_aoa,mach)::T*data.force_scalar
 		lift = data.lift_itrp(cos_aoa,mach)::T*data.force_scalar
@@ -68,17 +68,19 @@ function aero_force(data::AtmosphericData, bv::AbstractArray{T}, vel::AbstractAr
 	trqd = cross(vel, bv)
 	liftd = cross(-trqd,vel)
 	liftd_norm = sqrt(sum(liftd .^ 2))#sqrt(sum(vel .^ 2) * sum(bv .^ 2) * (sum(vel .^ 2) - cos_aoa^2))
+	drag_norm = sqrt(sum(vel .^ 2))
 	liftd = (liftd)/liftd_norm
-	dragf = drag*vel/sqrt(sum(vel .^ 2))
 	liftf = lift*(SymFunction("ifnz").(liftd_norm, liftd))
-	return dragf + liftf, trq*(SymFunction("ifnz").(trqd/sqrt(sum(trqd .^ 2)), trqd))
+	dragf = SymFunction("ifnz").(drag_norm, drag*vel/drag_norm)
+	total_force = dragf + liftf
+	return SymFunction("ifnz").(total_force, total_force), trq*(SymFunction("ifnz").(trqd/sqrt(sum(trqd .^ 2)), trqd))
 end
 
 function aero_force(data::ExoatmosphericData, bv::AbstractArray{T} where T, vel::AbstractArray{T} where T, spds::Float64)
 	return [0.0,0.0,0.0]
 end
 
-function direct_drag(data::AtmosphericData, cos_aoa, mach)::Float64
+function direct_drag(data::AtmosphericData, cos_aoa, mach)
 	return data.drag_itrp(cos_aoa, mach)
 end
 
@@ -86,7 +88,7 @@ function direct_drag(::Type{Val{:jac}}, data::AtmosphericData, cos_aoa, mach)
 	return Interpolations.gradient(data.drag_itrp, cos_aoa, mach)::StaticArrays.SArray{Tuple{2},Float64,1,2}
 end
 
-function direct_lift(data::AtmosphericData, cos_aoa::Float64, mach::Float64)::Float64
+function direct_lift(data::AtmosphericData, cos_aoa, mach)
 	return data.lift_itrp(cos_aoa, mach)
 end
 
@@ -94,7 +96,7 @@ function direct_lift(::Type{Val{:jac}}, data::AtmosphericData, cos_aoa, mach)
 	return Interpolations.gradient(data.lift_itrp, cos_aoa, mach)::StaticArrays.SArray{Tuple{2},Float64,1,2}
 end
 
-function direct_trq(data::AtmosphericData, cos_aoa, mach)::Float64
+function direct_trq(data::AtmosphericData, cos_aoa, mach)
 	return data.trq_itrp(cos_aoa, mach)
 end
 
@@ -102,15 +104,15 @@ function direct_trq(::Type{Val{:jac}}, data::AtmosphericData, cos_aoa, mach)
 	return Interpolations.gradient(data.trq_itrp, cos_aoa, mach)::StaticArrays.SArray{Tuple{2},Float64,1,2}
 end
 
-function direct_drag(data::ExoatmosphericData, cos_aoa, mach)::Float64
+function direct_drag(data::ExoatmosphericData, cos_aoa, mach)
 	return 0.0
 end
 
-function direct_lift(data::ExoatmosphericData, cos_aoa, mach)::Float64
+function direct_lift(data::ExoatmosphericData, cos_aoa, mach)
 	return 0.0
 end
 
-function direct_trq(data::ExoatmosphericData, cos_aoa, mach)::Float64
+function direct_trq(data::ExoatmosphericData, cos_aoa, mach)
 	return 0.0
 end
 

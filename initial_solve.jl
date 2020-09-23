@@ -125,10 +125,10 @@ function linear_points(problem::DescentProblem)
     return initial_points
 end
 
-function linear_initial(problem::DescentProblem, cache::Dynamics.LinearCache)
+function linear_initial(problem::DescentProblem, cache::Dynamics.IntegratorCache)
     initial_points = linear_points(problem)
     return initial_points, #Dynamics.linearize_dynamics(initial_points, problem.tf_guess, 1/(problem.K+1), ProbInfo(problem))
-        Dynamics.linearize_dynamics_symb(initial_points, problem.tf_guess, cache)
+        Dynamics.linearize_dynamics(initial_points, problem.tf_guess, 1/(problem.K+1), cache)
 end
 
 end

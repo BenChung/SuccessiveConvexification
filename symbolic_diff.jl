@@ -96,7 +96,7 @@ function convert_diff(ex::Basic, derivs::Dict{Deriv, Symbol}, substs::Dict{Symbo
     return _convert_diff(ex, derivs, substs)
 end
 
-function convert_diff(exes::Array{Basic, D} where D, derivs::Dict{Deriv, Symbol}, substs::Dict{Symbol, Any})
+function convert_diff(exes::AbstractArray{Basic}, derivs::Dict{Deriv, Symbol}, substs::Dict{Symbol, Any})
 	return map(expr -> convert_diff(expr, derivs, substs), exes)
 end
 
@@ -151,6 +151,46 @@ function make_simplified(name, fun, nargs; postprocess = nothing, expected_args 
 	else 
 		return :($(name)(inp, $(ordered_args...)) = $(fbody.args...))
 	end
+end
+
+function make_simplified_array(name, fun, nargs; postprocess = nothing, expected_args = Set{Symbol}())
+	# symbolically execute the body
+	args = [symbols("x$i") for i = 1:nargs]
+	retv = fun(args)
+	exprs = convert_diff(retv, Dict{Deriv,Symbol}(), Dict{Symbol,Any}())
+	if exprs isa Array{T, 1} where T
+		rexpr = Expr(:vect, exprs...)
+	elseif exprs isa Array{T, 2} where T
+		rexpr = Expr(:vect, reshape(exprs, length(exprs))...)
+	else 
+		rexpr = Expr(:vect, exprs)
+	end
+	if !isnothing(postprocess)
+		rexpr = postprocess(rexpr)
+	end
+	body = macroexpand(CommonSubexpressions,:(@cse $rexpr))
+
+	# compute the extra arguments
+	need_args = Set{Symbol}()
+	map(x -> push!(need_args, x), vcat(map(x -> map(Symbol, SymEngine.free_symbols(x)), retv)...))
+	needed_state = intersect(need_args, Set{Symbol}(map(Symbol, args)))
+	map(x -> delete!(need_args, Symbol(x)), args)
+	ordered_args = sort(collect(union(need_args, expected_args)))
+
+	# generate the header
+	header = map((idx,var) -> :($(Symbol(var)) = inp[$idx]), 
+		parse.(Int, map(x -> String(x)[2:end], collect(needed_state))), needed_state)
+	result = body.args[end]
+	result.head = :call
+	pushfirst!(result.args, :SVector)
+	#output the simplified function
+	fbody = (Expr(:block, header...,
+				 body.args[1:end-1]...,
+				 result))
+
+	outexp = :($(name)(inp, $(ordered_args...)) = $(fbody.args...))
+	#println(outexp)
+	return outexp
 end
 
 function make_jacobian(fnname, fun, nargs)

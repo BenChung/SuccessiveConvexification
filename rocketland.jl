@@ -1,7 +1,8 @@
 module Rocketland
-using Mosek
+#using Mosek
 using MathOptInterface
 using MosekTools
+using ECOS
 using Rotations
 using StaticArrays
 using LinearAlgebra
@@ -13,7 +14,7 @@ import ..FirstRound
 
 #state indexing
 const state_dim = 14
-const control_dim = 5
+const control_dim = 3
 const r_idx_it = 2:4
 const v_idx_it = 5:7
 const qbi_idx_it = 8:11
@@ -22,11 +23,19 @@ const acc_width = state_dim+control_dim*2+3
 const acc_height = state_dim
 const mass_idx = 1
 
-function create_initial(problem::DescentProblem, linear_cache::LinearCache)
+#=
+how to use
+julia> Dynamics.make_dynamics_module(RocketlandDefns.ProbInfo(SampleProblems.base_prob_aero_scaled))
+julia> cache=Dynamics.IntegratorCache(SampleProblems.base_prob_aero_scaled, RocketlandDefns.ProbInfo(SampleProblems.base_prob_aero_scaled), Linearizer);
+julia> pi = Rocketland.create_initial(SampleProblems.base_prob_aero_scaled, cache);
+
+=#
+
+function create_initial(problem::DescentProblem, linear_cache::IntegratorCache)
     K = problem.K
     initial_points,linpoints = FirstRound.linear_initial(problem, linear_cache)
     model = build_model(problem, K, linpoints, initial_points, problem.tf_guess)
-    return ProblemIteration(problem, linear_cache, problem.tf_guess, initial_points, linpoints, model, 0, Inf, Inf)
+    return ProblemIteration(problem, linear_cache, problem.tf_guess, initial_points, linpoints, model, 0, 1.0, Inf)
 end
 
 const MOI=MathOptInterface
@@ -42,8 +51,9 @@ const SOC=MOI.SecondOrderCone
 # Jk = -1 x[1, K+1] + 1e4 * norm(x[:, i+1] - act[i+1])
 
 function build_model(prob, K, iterDynam, iterAbout, sigHat)
-	model = MosekOptimizer(#=MSK_IPAR_LOG=0,=#MSK_IPAR_INFEAS_REPORT_AUTO=1,MSK_IPAR_BI_IGNORE_MAX_ITER=1,
-				MSK_IPAR_INTPNT_MAX_ITERATIONS=10000)
+	#model = 
+	model = MOI.instantiate(() -> Mosek.Optimizer(#=MSK_IPAR_LOG=0,=#MSK_IPAR_INFEAS_REPORT_AUTO=1,MSK_IPAR_BI_IGNORE_MAX_ITER=1,
+				MSK_IPAR_INTPNT_MAX_ITERATIONS=10000); with_bridge_type=Float64)
 	dcs = MOI.ConstraintIndex[]
 	state_nuc = MOI.ConstraintIndex[]
 
@@ -52,13 +62,15 @@ function build_model(prob, K, iterDynam, iterAbout, sigHat)
 	delMax = cosd(prob.deltaMax)
 	cosma = cosd(45.0)
 
+	all_state_dim = state_dim*(K+1)
+	all_control_dim = control_dim*(K+1)
 	#main state variables
-	xv = reshape(MOI.add_variables(model, state_dim*(K+1)), state_dim, K+1)
-	uv = reshape(MOI.add_variables(model, control_dim*(K+1)), control_dim, K+1)
-	dxv = reshape(MOI.add_variables(model, state_dim*(K+1)), state_dim, K+1)
-	duv = reshape(MOI.add_variables(model, control_dim*(K+1)), control_dim, K+1)
+	xv = reshape(MOI.add_variables(model, all_state_dim), state_dim, K+1)
+	uv = reshape(MOI.add_variables(model, all_control_dim), control_dim, K+1)
+	dxv = reshape(MOI.add_variables(model, all_state_dim), state_dim, K+1)
+	duv = reshape(MOI.add_variables(model, all_control_dim), control_dim, K+1)
 	dsig = MOI.add_variable(model)
-	nuv = reshape(MOI.add_variables(model, state_dim*(K+1)), state_dim, K+1)
+	nuv = reshape(MOI.add_variables(model, all_state_dim), state_dim, K+1)
 
 	# trust regions
 	Jvnu = MOI.add_variable(model)
@@ -72,18 +84,18 @@ function build_model(prob, K, iterDynam, iterAbout, sigHat)
 
 	# couple the xs and us to the dxs and the dus
 	# about + dx = x; about + du = u; etc
-    # vcat(iterAbout[:].state...) + reshape(xv, state_dim*(K+1)) - reshape(xv, state_dim*(K+1)) = 0
-    # vcat(iterAbout[:].control...) + reshape(duv, control_dim*(K+1)) - reshape(uv, control_dim*(K+1)) = 0
-    state_base = MOI.add_constraint(model, VAF(VA.([1:state_dim*(K+1); 1:state_dim*(K+1)], 
-    	[SA.(1.0, reshape(dxv, state_dim*(K+1))); SA.(-1.0, reshape(xv, state_dim*(K+1)))]), 
-    	Array(vcat(getfield.(iterAbout[:], :state)...))), MOI.Zeros(state_dim*(K+1)))
-    control_base = MOI.add_constraint(model, VAF(VA.([1:control_dim*(K+1); 1:control_dim*(K+1)], 
-    	[SA.(1.0, reshape(duv, control_dim*(K+1))); SA.(-1.0, reshape(uv, control_dim*(K+1)))]), 
-    	Array(vcat(getfield.(iterAbout[:], :control)...))), MOI.Zeros(control_dim*(K+1)))
+    # vcat(iterAbout[:].state...) + reshape(xv, all_state_dim) - reshape(xv, all_state_dim) = 0
+    # vcat(iterAbout[:].control...) + reshape(duv, all_control_dim) - reshape(uv, all_control_dim) = 0
+    state_base = MOI.add_constraint(model, VAF(VA.([1:all_state_dim; 1:all_state_dim], 
+    	[SA.(1.0, reshape(dxv, all_state_dim)); SA.(-1.0, reshape(xv, all_state_dim))]), 
+    	Array(vcat(getfield.(iterAbout[:], :state)...))), MOI.Zeros(all_state_dim))
+    control_base = MOI.add_constraint(model, VAF(VA.([1:all_control_dim; 1:all_control_dim], 
+    	[SA.(1.0, reshape(duv, all_control_dim)); SA.(-1.0, reshape(uv, all_control_dim))]), 
+    	Array(vcat(getfield.(iterAbout[:], :control)...))), MOI.Zeros(all_control_dim))
 
     # build the trust regions
-    MOI.add_constraint(model, VoV([Jvnu; reshape(nuv, state_dim*(K+1))]), SOC(state_dim*(K+1) + 1))
-    MOI.add_constraint(model, VoV([Jtr; reshape(dxv, state_dim*(K+1)); reshape(duv, control_dim*(K+1))]), SOC(1+state_dim*(K+1)+control_dim*(K+1)))
+    MOI.add_constraint(model, VoV([Jvnu; reshape(nuv, all_state_dim)]), SOC(all_state_dim + 1))
+    MOI.add_constraint(model, VoV([Jtr; reshape(dxv, all_state_dim); reshape(duv, all_control_dim)]), SOC(1+all_state_dim+all_control_dim))
     MOI.add_constraint(model, VoV([Jsig; dsig]), SOC(2))
 
 	#initial and final state constraints
@@ -112,7 +124,9 @@ function build_model(prob, K, iterDynam, iterAbout, sigHat)
 		nu_eqn = map(invar -> VA(invar[1], SA(1.0, invar[2])), enumerate(nuv[:,n+1]))
 		eq_eqn = map(invar -> VA(invar[1], SA(-1.0, invar[2])), enumerate(dxv[:,n+1]))
 		lin_err = Array(iterDynam[n].endpoint - iterAbout[n+1].state)
-		push!(dcstrs, MOI.add_constraint(model, VAF(vcat(matmul, nu_eqn, eq_eqn), lin_err), MOI.Zeros(state_dim)))
+		func = VAF(vcat(matmul, nu_eqn, eq_eqn), lin_err)
+		cstr = MOI.add_constraint(model, func, MOI.Zeros(state_dim))
+		push!(dcstrs, cstr)
 	end
 
 	# state constraints wooo; equation nums from Szmuk and Acikmese 2018
@@ -184,10 +198,10 @@ function build_model(prob, K, iterDynam, iterAbout, sigHat)
 	thrust_lb_constraint = MOI.add_constraint(model, VAF(tlbvars, tlbconsts), MOI.Nonpositives(K+1))
 
 	# simple fin constraints 
-	finmxf = MOI.add_variables(model, K+1)
+	#finmxf = MOI.add_variables(model, K+1)
 	#MOI.add_constraint(model, VAF(VA.(1:K+1, SA.(1.0, finmxf)), fill(-0.01,K+1)), MOI.Zeros(K+1))
 	for n=1:K+1
-		MOI.add_constraint(model, VAF(VA.(1:2, SA.(1.0, uv[4:5, n])), fill(-0.000001,2)), MOI.Nonpositives(2))
+		#MOI.add_constraint(model, VAF(VA.(1:2, SA.(1.0, uv[4:5, n])), fill(-0.000001,2)), MOI.Nonpositives(2))
 		#MOI.add_constraint(model, VoV([finmxf[n]; uv[4:5, n]]), SOC(3))
 	end
 
@@ -206,7 +220,7 @@ function vsq_sub_dotsq(inp::Vector{T}) where T
 	return dot(inp[1:3], Dynamics.DCM(inp[4:7])*[1.0,0,0])^2
 end
 
-function solve_step(iteration::ProblemIteration, linear_cache::LinearCache)
+function solve_step(iteration::ProblemIteration, linear_cache::IntegratorCache)
 	prob = iteration.problem
 	itermodel = iteration.model
 	model = itermodel.socp_model
@@ -219,6 +233,8 @@ function solve_step(iteration::ProblemIteration, linear_cache::LinearCache)
 	nuv = itermodel.nuv
 	rk = itermodel.rk
 	dbg = itermodel.debug
+	all_state_dim = state_dim*(K+1)
+	all_control_dim = control_dim*(K+1)
 	# fix the base constraints
 
 	about = iteration.about
@@ -256,11 +272,11 @@ function solve_step(iteration::ProblemIteration, linear_cache::LinearCache)
 	    error("Non-optimal result $status exiting")
 	end
 
-	xr = reshape(MOI.get(model, MOI.VariablePrimal(), reshape(xv, state_dim*(K+1))), state_dim, K+1)
-	ur = reshape(MOI.get(model, MOI.VariablePrimal(), reshape(uv, control_dim*(K+1))), control_dim, K+1)
+	xr = reshape(MOI.get(model, MOI.VariablePrimal(), reshape(xv, all_state_dim)), state_dim, K+1)
+	ur = reshape(MOI.get(model, MOI.VariablePrimal(), reshape(uv, all_control_dim)), control_dim, K+1)
 	dsr = MOI.get(model, MOI.VariablePrimal(), dsig)
-	nur = (reshape(MOI.get(model, MOI.VariablePrimal(), reshape(nuv, state_dim*(K+1))), state_dim, K+1))
-	dxvr = (reshape(MOI.get(model, MOI.VariablePrimal(), reshape(dxv, state_dim*(K+1))), state_dim, K+1))
+	nur = (reshape(MOI.get(model, MOI.VariablePrimal(), reshape(nuv, all_state_dim)), state_dim, K+1))
+	dxvr = (reshape(MOI.get(model, MOI.VariablePrimal(), reshape(dxv, all_state_dim)), state_dim, K+1))
 	Jtrr = MOI.get(model, MOI.VariablePrimal(), dbg[1])
 	println("Jtr $Jtrr")
 
@@ -296,7 +312,7 @@ function solve_step(iteration::ProblemIteration, linear_cache::LinearCache)
 	traj_points = [LinPoint(xr[:,n], ur[:,n]) for n=1:K+1]
 	#return traj_points
 	nsig = iteration.sigma + dsr 
-	linpoints = Dynamics.linearize_dynamics_symb(traj_points, iteration.sigma + dsr, linear_cache)
+	linpoints = Dynamics.linearize_dynamics(traj_points, iteration.sigma + dsr, 1/(prob.K+1), linear_cache)
 	return ProblemIteration(prob, iteration.cache, iteration.sigma + dsr, traj_points, linpoints, 
 		iteration.model, iteration.iter+1, next_rk, jK), dxvr				
 
