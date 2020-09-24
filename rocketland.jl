@@ -1,13 +1,8 @@
 module Rocketland
 #using Mosek
 using MathOptInterface
-<<<<<<< HEAD
-using MosekTools
 using ECOS
-=======
-using Mosek
 using MosekTools
->>>>>>> 6d18d726748568198fe41d32ebcf2420ce96670c
 using Rotations
 using StaticArrays
 using LinearAlgebra
